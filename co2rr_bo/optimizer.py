@@ -144,6 +144,13 @@ class CO2RROptimizer:
         (default ``"ucb"``).
     qnei_mc_samples : int, optional
         Number of QMC samples for qNEI (default 128).
+    kernel_type : str, optional
+        Surrogate kernel type: ``"matern"`` or ``"spectral_mixture"``
+        (default ``"matern"``).
+    h2_penalty_weight : float, optional
+        If > 0, optimize a composite target
+        ``Y_target - h2_penalty_weight * Y_H2`` to discourage HER-dominant
+        conditions (default 0.0, disabled).
     seed : int or None, optional
         Global random seed for NumPy/Torch/Python to improve reproducibility
         (default None).
@@ -164,6 +171,7 @@ class CO2RROptimizer:
         acq_strategy: str = "ucb",
         qnei_mc_samples: int = 128,
         kernel_type: str = "matern",
+        h2_penalty_weight: float = 0.0,
         candidates_path: Optional[str | Path] = None,
         n_restarts: int = 10,
         raw_samples: int = 256,
@@ -182,7 +190,8 @@ class CO2RROptimizer:
         self.beta_delta = beta_delta
         self.acq_strategy = acq_strategy.lower()
         self.qnei_mc_samples = int(qnei_mc_samples)
-        self.kernel_type = kernel_type
+        self.kernel_type = kernel_type.lower()
+        self.h2_penalty_weight = float(h2_penalty_weight)
         self.candidates_path = (
             Path(candidates_path) if candidates_path else None
         )
@@ -210,6 +219,13 @@ class CO2RROptimizer:
             )
         if self.qnei_mc_samples <= 0:
             raise ValueError("qnei_mc_samples must be a positive integer.")
+        if self.kernel_type not in {"matern", "spectral_mixture"}:
+            raise ValueError(
+                f"Unsupported kernel_type='{kernel_type}'. "
+                "Use 'matern' or 'spectral_mixture'."
+            )
+        if self.h2_penalty_weight < 0:
+            raise ValueError("h2_penalty_weight must be >= 0.")
 
         if self.seed is not None:
             set_global_seed(self.seed)
@@ -271,6 +287,13 @@ class CO2RROptimizer:
                 else ""
             ),
         )
+        logger.info("Surrogate kernel: %s", self.kernel_type)
+        if self.h2_penalty_weight > 0:
+            logger.info(
+                "Composite objective enabled: %s - %.4f * Y_H2",
+                self.target_column,
+                self.h2_penalty_weight,
+            )
 
         # State (populated by phases)
         self.df: pd.DataFrame = pd.DataFrame()
@@ -405,7 +428,7 @@ class CO2RROptimizer:
             raise RuntimeError("Phase 1 must be run before Phase 2.")
 
         X_raw = self.df[self.selected_features].values.astype(np.float64)
-        Y_raw = self.df[self.target_column].values.astype(np.float64)
+        Y_raw = self._build_training_target(self.df)
 
         self.surrogate.fit(
             X_raw, Y_raw, self.selected_features,
@@ -413,6 +436,32 @@ class CO2RROptimizer:
             kernel_type=self.kernel_type,
         )
         logger.info("Phase 2 complete.")
+
+    def _build_training_target(self, df: pd.DataFrame) -> np.ndarray:
+        """Build the surrogate training target from raw product columns.
+
+        Returns either the original target product or a selectivity-aware
+        composite objective that penalizes hydrogen evolution.
+        """
+        y_target = df[self.target_column].values.astype(np.float64)
+        if self.h2_penalty_weight <= 0.0:
+            return y_target
+
+        if "Y_H2" not in df.columns:
+            logger.warning(
+                "h2_penalty_weight > 0 but 'Y_H2' column is missing. "
+                "Falling back to single-target objective."
+            )
+            return y_target
+
+        y_h2 = df["Y_H2"].values.astype(np.float64)
+        y_composite = y_target - self.h2_penalty_weight * y_h2
+        logger.info(
+            "Using composite objective: %s - %.4f * Y_H2",
+            self.target_column,
+            self.h2_penalty_weight,
+        )
+        return y_composite
 
     # ===================================================================
     #  PHASE 3
@@ -812,6 +861,8 @@ class CO2RROptimizer:
             "top_k": self.top_k,
             "acq_strategy": self.acq_strategy,
             "qnei_mc_samples": self.qnei_mc_samples,
+            "kernel_type": self.kernel_type,
+            "h2_penalty_weight": self.h2_penalty_weight,
             "beta": self.beta,
             "beta_schedule": self.beta_schedule,
             "beta_delta": self.beta_delta,

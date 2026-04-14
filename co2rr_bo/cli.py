@@ -97,6 +97,13 @@ Examples:
         help="Surrogate model kernel type (default: matern). See CatBOX literature.",
     )
     parser.add_argument(
+        "--h2-penalty-weight", type=float, default=0.0,
+        help=(
+            "If > 0, optimize composite target: target - weight * Y_H2 "
+            "to discourage HER (default: 0.0)"
+        ),
+    )
+    parser.add_argument(
         "--beta-delta", type=float, default=0.1,
         help=(
             "Confidence delta for theory beta_t schedule (0,1); "
@@ -164,6 +171,7 @@ def main() -> None:
         acq_strategy=args.acq_strategy,
         qnei_mc_samples=args.qnei_mc_samples,
         kernel_type=args.kernel_type,
+        h2_penalty_weight=args.h2_penalty_weight,
         candidates_path=args.candidates,
         skip_feature_selection=args.skip_feature_selection,
         strict_training_schema=args.strict_training_schema,

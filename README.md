@@ -179,6 +179,12 @@ python run.py --beta-schedule theory-strict --beta-delta 0.1 --seed 42
 # 高噪声场景推荐：qNEI
 python run.py --acq-strategy qnei --qnei-mc-samples 256 --seed 42
 
+# 使用谱混合核（CatBOX 启发）
+python run.py --kernel-type spectral_mixture --seed 42
+
+# 选择性优化（惩罚 HER 副反应）
+python run.py --target-product CO --h2-penalty-weight 0.3 --seed 42
+
 # 也可通过模块方式运行
 python -m co2rr_bo --non-interactive
 ```
@@ -198,6 +204,8 @@ python -m co2rr_bo --non-interactive
 | `--beta-delta` | `0.1` | 理论 β_t 调度的置信参数 δ（在 `theory/theory-strict` 下生效） |
 | `--acq-strategy` | `ucb` | 采集策略：`ucb` 或 `qnei`（噪声实验更推荐） |
 | `--qnei-mc-samples` | `128` | qNEI 的 QMC 采样数（越大越稳健，计算更慢） |
+| `--kernel-type` | `matern` | GP 核函数：`matern`（默认）或 `spectral_mixture`（适合复杂多峰响应面） |
+| `--h2-penalty-weight` | `0.0` | 若大于 0，优化目标改为 `Y_target - weight * Y_H2`，用于抑制 HER 竞争反应 |
 | `--iterations` | `10` | 贝叶斯优化迭代次数 |
 | `--non-interactive` | `False` | 非交互演示模式 (自动模拟实验结果) |
 | `--skip-feature-selection` | `False` | 跳过 RF 特征筛选，直接使用全部 19 维特征（论文最小闭环模式） |

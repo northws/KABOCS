@@ -211,19 +211,33 @@ class SurrogateModel:
 
         try:
             covar = self.model.covar_module
-            outputscale = covar.outputscale.item()
-            lengthscales = covar.base_kernel.lengthscale.detach().cpu().squeeze()
-
             logger.info("GP Hyperparameters:")
-            logger.info("  Output scale:  %.4f", outputscale)
             logger.info("  Noise variance: %.6f",
                          self.model.likelihood.noise.item())
 
-            logger.info("  ARD length-scales (per feature):")
-            for i, feat in enumerate(selected_features):
-                ls = (lengthscales[i].item()
-                      if lengthscales.dim() > 0
-                      else lengthscales.item())
-                logger.info("    %-35s  ℓ=%.4f", feat, ls)
+            if isinstance(covar, ScaleKernel) and hasattr(covar, "base_kernel"):
+                outputscale = covar.outputscale.item()
+                lengthscales = covar.base_kernel.lengthscale.detach().cpu().squeeze()
+
+                logger.info("  Output scale:  %.4f", outputscale)
+                logger.info("  ARD length-scales (per feature):")
+                for i, feat in enumerate(selected_features):
+                    ls = (lengthscales[i].item()
+                          if lengthscales.dim() > 0
+                          else lengthscales.item())
+                    logger.info("    %-35s  ℓ=%.4f", feat, ls)
+            elif isinstance(covar, SpectralMixtureKernel):
+                logger.info("  Kernel: SpectralMixtureKernel")
+                logger.info("  Num mixtures: %d", covar.num_mixtures)
+                logger.info(
+                    "  Mixture means shape: %s",
+                    tuple(covar.mixture_means.shape),
+                )
+                logger.info(
+                    "  Mixture scales shape: %s",
+                    tuple(covar.mixture_scales.shape),
+                )
+            else:
+                logger.info("  Kernel type: %s", covar.__class__.__name__)
         except Exception as e:
             logger.debug("Could not log hyperparameters: %s", e)
