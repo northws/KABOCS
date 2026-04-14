@@ -67,11 +67,28 @@ Examples:
         ),
     )
     parser.add_argument(
-        "--beta-schedule", type=str, choices=["fixed", "theory"],
+        "--beta-schedule", type=str,
+        choices=["fixed", "theory", "theory-strict"],
         default="fixed",
         help=(
-            "Beta schedule mode: fixed uses constant beta; "
-            "theory uses a time-varying beta_t sequence"
+            "Beta schedule mode: fixed uses constant beta; theory uses "
+            "a scaled time-varying beta_t; theory-strict uses pure "
+            "theoretical beta_t without user scaling"
+        ),
+    )
+    parser.add_argument(
+        "--acq-strategy", type=str, choices=["ucb", "qnei"],
+        default="ucb",
+        help=(
+            "Acquisition strategy: ucb (analytic UCB) or "
+            "qnei (Monte Carlo noisy expected improvement)"
+        ),
+    )
+    parser.add_argument(
+        "--qnei-mc-samples", type=int, default=128,
+        help=(
+            "Number of QMC samples for qNEI Monte Carlo estimation "
+            "(default: 128)"
         ),
     )
     parser.add_argument(
@@ -139,6 +156,8 @@ def main() -> None:
         beta=args.beta,
         beta_schedule=args.beta_schedule,
         beta_delta=args.beta_delta,
+        acq_strategy=args.acq_strategy,
+        qnei_mc_samples=args.qnei_mc_samples,
         candidates_path=args.candidates,
         skip_feature_selection=args.skip_feature_selection,
         strict_training_schema=args.strict_training_schema,

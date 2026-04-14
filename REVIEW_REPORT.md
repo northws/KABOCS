@@ -119,3 +119,22 @@
 ---
 
 结论：主实现已达到“可用于论文方法复现与工程运行”的成熟度，下一阶段重点应从“算法补齐”转向“复现治理”（理论公式对齐 + 默认交互体验）。
+
+## 八、基于 arXiv 的新增优化（2026-04-15）
+
+本次按“噪声实验稳健性 + 理论复现精度 + 工程可用性”三条线新增改进：
+
+1. 新增采集策略 `qNEI`（`--acq-strategy qnei`）
+- 动机：参考 *Constrained Bayesian Optimization with Noisy Experiments*（arXiv:1706.07094v2）与 BoTorch 方法论文（arXiv:1910.06403v3），在高噪声实验反馈下 qNEI 通常较纯 UCB 更稳健。
+- 落地：`acquisition.py` 新增 `build_qnei`，并在 `optimizer.py` 中完成 UCB/qNEI 统一调度。
+
+2. 新增严格理论 β_t 调度 `theory-strict`
+- 动机：回应第三轮报告中“theory 仍含 beta 缩放近似”的问题。
+- 落地：`--beta-schedule theory-strict` 采用纯理论 β_t（不再乘以用户 beta），用于更高保真论文复现。
+
+3. CLI 与文档同步增强
+- 新参数：`--acq-strategy`、`--qnei-mc-samples`、`--beta-schedule theory-strict`。
+- README 增补运行示例、参数表与 qNEI 使用建议。
+
+4. 参考文献归档
+- 已将本轮引用的 arXiv PDF 放入 `reference/` 目录，并附 `reference/README.md` 说明对应算法动机。

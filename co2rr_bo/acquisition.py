@@ -20,9 +20,11 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import torch
-from botorch.acquisition import UpperConfidenceBound
+from botorch.acquisition import AcquisitionFunction, UpperConfidenceBound
+from botorch.acquisition.monte_carlo import qNoisyExpectedImprovement
 from botorch.models import SingleTaskGP
 from botorch.optim import optimize_acqf
+from botorch.sampling.normal import SobolQMCNormalSampler
 
 from co2rr_bo.constants import (
     ALL_FEATURE_COLUMNS,
@@ -54,8 +56,42 @@ def build_ucb(model: SingleTaskGP, beta: float) -> UpperConfidenceBound:
     return UpperConfidenceBound(model=model, beta=beta)
 
 
+def build_qnei(
+    model: SingleTaskGP,
+    num_mc_samples: int = 128,
+    prune_baseline: bool = True,
+) -> qNoisyExpectedImprovement:
+    """Construct a qNoisyExpectedImprovement acquisition function.
+
+    Parameters
+    ----------
+    model : SingleTaskGP
+        Fitted GP surrogate model.
+    num_mc_samples : int, optional
+        Number of QMC samples for MC estimation (default 128).
+    prune_baseline : bool, optional
+        Whether to prune dominated baseline points (default True).
+
+    Returns
+    -------
+    qNoisyExpectedImprovement
+        The qNEI acquisition function.
+    """
+    if model.train_inputs is None or len(model.train_inputs) == 0:
+        raise ValueError("Model has no training inputs; cannot build qNEI.")
+
+    x_baseline = model.train_inputs[0]
+    sampler = SobolQMCNormalSampler(sample_shape=torch.Size([num_mc_samples]))
+    return qNoisyExpectedImprovement(
+        model=model,
+        X_baseline=x_baseline,
+        sampler=sampler,
+        prune_baseline=prune_baseline,
+    )
+
+
 def optimize_continuous(
-    acq_func: UpperConfidenceBound,
+    acq_func: AcquisitionFunction,
     K: int,
     device: torch.device,
     n_restarts: int = 10,
@@ -65,7 +101,7 @@ def optimize_continuous(
 
     Parameters
     ----------
-    acq_func : UpperConfidenceBound
+    acq_func : AcquisitionFunction
         The acquisition function.
     K : int
         Number of features (dimensionality).
@@ -217,7 +253,7 @@ def load_discrete_candidates(
 
 
 def evaluate_discrete_candidates(
-    acq_func: UpperConfidenceBound,
+    acq_func: AcquisitionFunction,
     candidates_df: pd.DataFrame,
     selected_features: list[str],
     bounds_raw: torch.Tensor,
@@ -237,7 +273,7 @@ def evaluate_discrete_candidates(
 
     Parameters
     ----------
-    acq_func : UpperConfidenceBound
+    acq_func : AcquisitionFunction
         The acquisition function.
     candidates_df : pd.DataFrame
         DataFrame of candidate vectors (all selected features present).

@@ -22,7 +22,7 @@
 > **"Efficient and Principled Scientific Discovery through Bayesian Optimization: A Tutorial"**
 > *(arXiv:2604.01328v3)*
 
-核心技术栈：`BoTorch` (GP-UCB 采集函数) + `GPyTorch` (高斯过程代理模型) + `scikit-learn` (随机森林特征选择)。
+核心技术栈：`BoTorch` (UCB/qNEI 采集函数) + `GPyTorch` (高斯过程代理模型) + `scikit-learn` (随机森林特征选择)。
 
 ### 核心特性
 
@@ -31,7 +31,7 @@
 | 🧪 **多产物优化** | 支持 CO、HCOOH、CH₄、C₂H₄、CH₃OH、C₂H₅OH、H₂ 七种 CO₂RR 产物 |
 | 🌲 **智能特征选择** | Random Forest 自动评估 19 个描述符的特征重要性，筛选 Top-K |
 | 🔬 **ARD Matérn 核** | `SingleTaskGP` + `ScaleKernel(MaternKernel(ν=2.5, ARD))`，每个特征独立学习长度尺度 |
-| 🎯 **UCB 采集函数** | Upper Confidence Bound 平衡探索与利用，可调参数 β |
+| 🎯 **多采集策略** | 支持 `UCB` 与 `qNEI`，覆盖低噪声与高噪声实验场景 |
 | 👨‍🔬 **Human-in-the-Loop** | 交互式 CLI 推荐实验方案 → 输入全部产物产量 → 自动更新模型 |
 | 📊 **离散候选评估** | 支持从候选 CSV 中评估离散设计空间（氨基酸、溶剂组合） |
 | 🖥️ **GPU/CPU 自适应** | 自动检测 CUDA 设备，支持 CPU 回退 |
@@ -54,7 +54,7 @@ Bayesian-Optimization-in-CO2RR/
 │   ├── utils.py                # 日志、设备选择、归一化/标准化工具
 │   ├── feature_selection.py    # Phase 1: 随机森林特征重要性评估与选择
 │   ├── surrogate.py            # Phase 2: GP 代理模型 (SingleTaskGP + ARD Matérn)
-│   ├── acquisition.py          # Phase 3: UCB 采集函数 + 人机交互 CLI
+│   ├── acquisition.py          # Phase 3: UCB/qNEI 采集函数 + 人机交互 CLI
 │   ├── optimizer.py            # CO2RROptimizer 编排器
 │   └── cli.py                  # 命令行参数解析
 │
@@ -66,6 +66,7 @@ Bayesian-Optimization-in-CO2RR/
 │   ├── feature_importances.png # 特征重要性图
 │   └── data_updated.csv        # 更新后的数据集
 │
+├── reference/                  # 参考文献 PDF（arXiv）
 └── arXiv-2604.01328v3/         # 参考论文 LaTeX 源文件
 ```
 
@@ -172,6 +173,12 @@ python run.py --skip-feature-selection --strict-training-schema --pre-fill-befor
 # 理论导向 beta_t 调度（可选）
 python run.py --beta-schedule theory --beta-delta 0.1 --seed 42
 
+# 严格理论 beta_t（不使用 beta 缩放）
+python run.py --beta-schedule theory-strict --beta-delta 0.1 --seed 42
+
+# 高噪声场景推荐：qNEI
+python run.py --acq-strategy qnei --qnei-mc-samples 256 --seed 42
+
 # 也可通过模块方式运行
 python -m co2rr_bo --non-interactive
 ```
@@ -187,8 +194,10 @@ python -m co2rr_bo --non-interactive
 | `--target-product` | `CO` | 优化目标产物：`CO`, `HCOOH`, `CH4`, `C2H4`, `CH3OH`, `C2H5OH`, `H2` |
 | `--top-k` | `10` | 特征选择保留的 Top-K 特征数 |
 | `--beta` | `2.0` | UCB 探索参数 β（本实现使用 $\mu + \beta\sigma$，即直接乘以 $\sigma$） |
-| `--beta-schedule` | `fixed` | β 调度策略：`fixed`（常数 β）或 `theory`（随迭代变化的 β_t） |
-| `--beta-delta` | `0.1` | 理论 β_t 调度的置信参数 δ（仅在 `--beta-schedule theory` 下生效） |
+| `--beta-schedule` | `fixed` | β 调度策略：`fixed`、`theory`（缩放理论 β_t）、`theory-strict`（纯理论 β_t） |
+| `--beta-delta` | `0.1` | 理论 β_t 调度的置信参数 δ（在 `theory/theory-strict` 下生效） |
+| `--acq-strategy` | `ucb` | 采集策略：`ucb` 或 `qnei`（噪声实验更推荐） |
+| `--qnei-mc-samples` | `128` | qNEI 的 QMC 采样数（越大越稳健，计算更慢） |
 | `--iterations` | `10` | 贝叶斯优化迭代次数 |
 | `--non-interactive` | `False` | 非交互演示模式 (自动模拟实验结果) |
 | `--skip-feature-selection` | `False` | 跳过 RF 特征筛选，直接使用全部 19 维特征（论文最小闭环模式） |
@@ -218,7 +227,7 @@ python -m co2rr_bo --non-interactive
 ## 🔬贝叶斯优化如何实现
 
 > **[核心提示]** 本实现主要落地原论文（arXiv:2604.01328v3）的理论框架，同时也包含了一项工程增强（Engineering Enhancement）。为保证审阅与复现的清晰性，特此澄清两者边界：
-> - **论文主流程**：Phase 2（BoTorch 代理模型构建）和 Phase 3（UCB 采集函数与人机交互优化）严格遵循论文设定（对应 Algorithm 2 / 3）。建议高保真复现时，组合使用 `--skip-feature-selection --strict-training-schema --pre-fill-before-choice --seed 42`；若偏理论配置，可进一步启用 `--beta-schedule theory`。
+> - **论文主流程**：Phase 2（BoTorch 代理模型构建）和 Phase 3（采集函数 + 人机交互优化）严格遵循论文设定（对应 Algorithm 2 / 3）。建议高保真复现时，组合使用 `--skip-feature-selection --strict-training-schema --pre-fill-before-choice --seed 42`；若偏理论配置，可进一步启用 `--beta-schedule theory-strict`。
 > - **RF 工程增强流程（默认）**：Phase 1（特征选择）是针对全量 19 维特征在极小样本量下可能遭遇降维打击而附加的启发式工程包（基于 RandomForest）。此设计虽能加速模型收敛，但不属于原论文核心闭环体系。
 
 
@@ -271,10 +280,10 @@ GP Hyperparameters:
     B_pI                                 ℓ=122.5229 ← 长尺度 = 低相关
 ```
 
-### Phase 3: UCB 采集函数与人机交互优化
+### Phase 3: 采集函数与人机交互优化（UCB / qNEI）
 
 ```
-GP → UCB(β) → optimize_acqf → Top-3 推荐 → 用户输入产量 → 更新数据 → 循环
+GP → {UCB(β) 或 qNEI} → optimize_acqf → Top-3 推荐 → 用户输入产量 → 更新数据 → 循环
 ```
 
 **UCB 采集函数：**
@@ -282,12 +291,16 @@ GP → UCB(β) → optimize_acqf → Top-3 推荐 → 用户输入产量 → 更
 $$\alpha_{\text{UCB}}(x) = \mu(x) + \beta \cdot \sigma(x)$$
 
 其中 $\mu(x)$ 是 GP 后验均值，$\sigma(x)$ 是后验标准差，$\beta$ 控制探索-利用平衡。
-在 `--beta-schedule fixed` 下，使用常数 $\beta$；在 `--beta-schedule theory` 下，使用随迭代变化的 $\beta_t$。
+在 `--beta-schedule fixed` 下，使用常数 $\beta$；在 `--beta-schedule theory` 下，使用按用户 `beta` 缩放的 $\beta_t$；在 `--beta-schedule theory-strict` 下，使用纯理论 $\beta_t$。
 注：部分文献写作 $\mu + \sqrt{\beta_t}\sigma$；本实现采用 BoTorch 常见参数化 $\mu + \beta\sigma$。
+
+**qNEI 采集函数（适合高噪声实验）：**
+
+qNEI 使用 Monte Carlo 方式估计 noisy expected improvement，在随机实验噪声较大或存在重复测量方差时，通常比纯 UCB 更稳健。
 
 **优化流程：**
 
-1. 构建 UCB 采集函数
+1. 按 `--acq-strategy` 构建 UCB 或 qNEI 采集函数
 2. 在连续 `[0,1]^K` 空间上优化 (`optimize_acqf`)
 3. 在离散候选集上评估采集值 (如果提供 `candidates.csv`)
 4. 合并并排序，打印 Top-3 推荐实验方案 (还原到原始物理尺度)

@@ -40,6 +40,7 @@ import pandas as pd
 import torch
 
 from co2rr_bo.acquisition import (
+    build_qnei,
     build_ucb,
     evaluate_discrete_candidates,
     load_discrete_candidates,
@@ -112,8 +113,10 @@ class CO2RROptimizer:
         Under ``beta_schedule='fixed'``, this is the per-iteration β.
         Under ``beta_schedule='theory'``, this is a scale factor applied
         to the theoretical β_t sequence.
+        Under ``beta_schedule='theory_strict'``, this value is ignored.
     beta_schedule : str, optional
-        Beta schedule strategy: ``"fixed"`` or ``"theory"``
+        Beta schedule strategy: ``"fixed"``, ``"theory"`` or
+        ``"theory_strict"``
         (default ``"fixed"``).
     beta_delta : float, optional
         Confidence parameter δ for theoretical β_t schedule
@@ -135,6 +138,12 @@ class CO2RROptimizer:
         If True, ask the expert to pre-fill non-selected feature values
         for the continuous candidate before candidate ranking/selection
         display (default False).
+    acq_strategy : str, optional
+        Acquisition strategy. ``"ucb"`` uses analytic UCB;
+        ``"qnei"`` uses Monte Carlo qNoisyExpectedImprovement
+        (default ``"ucb"``).
+    qnei_mc_samples : int, optional
+        Number of QMC samples for qNEI (default 128).
     seed : int or None, optional
         Global random seed for NumPy/Torch/Python to improve reproducibility
         (default None).
@@ -152,6 +161,8 @@ class CO2RROptimizer:
         beta: float = 2.0,
         beta_schedule: str = "fixed",
         beta_delta: float = 0.1,
+        acq_strategy: str = "ucb",
+        qnei_mc_samples: int = 128,
         candidates_path: Optional[str | Path] = None,
         n_restarts: int = 10,
         raw_samples: int = 256,
@@ -166,8 +177,10 @@ class CO2RROptimizer:
         self.data_path = Path(data_path)
         self.top_k = top_k
         self.beta = beta
-        self.beta_schedule = beta_schedule.lower()
+        self.beta_schedule = beta_schedule.lower().replace("-", "_")
         self.beta_delta = beta_delta
+        self.acq_strategy = acq_strategy.lower()
+        self.qnei_mc_samples = int(qnei_mc_samples)
         self.candidates_path = (
             Path(candidates_path) if candidates_path else None
         )
@@ -181,13 +194,20 @@ class CO2RROptimizer:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.beta_schedule not in {"fixed", "theory"}:
+        if self.beta_schedule not in {"fixed", "theory", "theory_strict"}:
             raise ValueError(
                 f"Unsupported beta_schedule='{beta_schedule}'. "
-                "Use 'fixed' or 'theory'."
+                "Use 'fixed', 'theory', or 'theory_strict'."
             )
         if not (0.0 < self.beta_delta < 1.0):
             raise ValueError("beta_delta must be in (0, 1).")
+        if self.acq_strategy not in {"ucb", "qnei"}:
+            raise ValueError(
+                f"Unsupported acq_strategy='{acq_strategy}'. "
+                "Use 'ucb' or 'qnei'."
+            )
+        if self.qnei_mc_samples <= 0:
+            raise ValueError("qnei_mc_samples must be a positive integer.")
 
         if self.seed is not None:
             set_global_seed(self.seed)
@@ -240,6 +260,15 @@ class CO2RROptimizer:
             self.beta,
             self.beta_delta,
         )
+        logger.info(
+            "Acquisition strategy: %s%s",
+            self.acq_strategy,
+            (
+                f" (mc_samples={self.qnei_mc_samples})"
+                if self.acq_strategy == "qnei"
+                else ""
+            ),
+        )
 
         # State (populated by phases)
         self.df: pd.DataFrame = pd.DataFrame()
@@ -281,6 +310,8 @@ class CO2RROptimizer:
             (t ** (d / 2.0 + 2.0)) * (np.pi ** 2) / (3.0 * delta)
         )
         theory_beta = max(theory_beta, 1e-12)
+        if self.beta_schedule == "theory_strict":
+            return float(theory_beta)
         return float(self.beta * theory_beta)
 
     # ===================================================================
@@ -416,8 +447,9 @@ class CO2RROptimizer:
         logger.info("PHASE 3: Acquisition & Human-in-the-Loop Optimization")
         logger.info("=" * 60)
         logger.info(
-            "Target: %s | beta_schedule=%s | beta=%.4f | iterations=%d",
+            "Target: %s | acq=%s | beta_schedule=%s | beta=%.4f | iterations=%d",
             target_name,
+            self.acq_strategy,
             self.beta_schedule,
             self.beta,
             n_iterations,
@@ -438,11 +470,21 @@ class CO2RROptimizer:
             logger.info("BO Iteration %d / %d", iteration, n_iterations)
             logger.info("-" * 50)
 
-            # 1. Build UCB acquisition function
-            beta_t = self._compute_beta_t(iteration, K)
-            self._beta_trace.append(beta_t)
-            logger.info("Using β_t = %.6f", beta_t)
-            acq_func = build_ucb(self.surrogate.model, beta_t)
+            # 1. Build acquisition function
+            if self.acq_strategy == "ucb":
+                beta_t = self._compute_beta_t(iteration, K)
+                self._beta_trace.append(beta_t)
+                logger.info("Using UCB with β_t = %.6f", beta_t)
+                acq_func = build_ucb(self.surrogate.model, beta_t)
+            else:
+                logger.info(
+                    "Using qNEI (Monte Carlo, mc_samples=%d)",
+                    self.qnei_mc_samples,
+                )
+                acq_func = build_qnei(
+                    self.surrogate.model,
+                    num_mc_samples=self.qnei_mc_samples,
+                )
 
             # 2. Optimize over continuous [0,1]^K
             cont_cand, cont_val = optimize_continuous(
@@ -765,6 +807,8 @@ class CO2RROptimizer:
             "data_path": str(self.data_path),
             "target_column": self.target_column,
             "top_k": self.top_k,
+            "acq_strategy": self.acq_strategy,
+            "qnei_mc_samples": self.qnei_mc_samples,
             "beta": self.beta,
             "beta_schedule": self.beta_schedule,
             "beta_delta": self.beta_delta,
