@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP
-from gpytorch.kernels import MaternKernel, ScaleKernel
+from gpytorch.kernels import MaternKernel, ScaleKernel, SpectralMixtureKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from co2rr_bo.utils import (
@@ -85,13 +85,14 @@ class SurrogateModel:
         Y_raw: np.ndarray,
         selected_features: list[str],
         design_bounds: dict[str, tuple[float, float]],
+        kernel_type: str = "matern",
     ) -> SingleTaskGP:
         """Build and fit the GP surrogate model.
 
         Steps:
         1. Normalize X to [0, 1] using explicit design-space bounds.
         2. Standardize Y (zero mean, unit variance).
-        3. Define SingleTaskGP with ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=K)).
+        3. Define SingleTaskGP using the specified kernel (Matern or SpectralMixture).
         4. Fit hyperparameters via ExactMarginalLogLikelihood + fit_gpytorch_mll.
 
         Parameters
@@ -105,6 +106,8 @@ class SurrogateModel:
         design_bounds : dict[str, tuple[float, float]]
             Explicit design-space bounds per feature,
             e.g. ``{"A_pI": (2.7, 10.8), ...}``.
+        kernel_type : str, optional
+            Type of kernel to use ("matern" or "spectral_mixture"), default "matern".
 
         Returns
         -------
@@ -160,15 +163,26 @@ class SurrogateModel:
             logger.info("  %-35s  [%.4f, %.4f]", feat, lo, hi)
 
         # ----- 3. Define the GP model -----
-        covar_module = ScaleKernel(
-            MaternKernel(nu=2.5, ard_num_dims=K)
-        )
+        if kernel_type == "matern":
+            covar_module = ScaleKernel(
+                MaternKernel(nu=2.5, ard_num_dims=K)
+            )
+        elif kernel_type == "spectral_mixture":
+            logger.info("Using SpectralMixtureKernel (derived from CatBOX / catalysis literature).")
+            # 4 mixtures is a reasonable default for standard datasets
+            covar_module = SpectralMixtureKernel(num_mixtures=4, ard_num_dims=K)
+        else:
+            raise ValueError(f"Unknown kernel_type '{kernel_type}'. Choose 'matern' or 'spectral_mixture'.")
 
         self.model = SingleTaskGP(
             train_X=self.train_X,
             train_Y=self.train_Y,
             covar_module=covar_module,
         ).to(self.device)
+
+        # For SpectralMixtureKernel, we must initialize parameters from data
+        if kernel_type == "spectral_mixture":
+            covar_module.initialize_from_data(self.train_X, self.train_Y)
 
         # ----- 4. Fit hyperparameters -----
         self.mll = ExactMarginalLogLikelihood(

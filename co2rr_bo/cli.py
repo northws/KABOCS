@@ -92,6 +92,11 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--kernel-type", type=str, default="matern",
+        choices=["matern", "spectral_mixture"],
+        help="Surrogate model kernel type (default: matern). See CatBOX literature.",
+    )
+    parser.add_argument(
         "--beta-delta", type=float, default=0.1,
         help=(
             "Confidence delta for theory beta_t schedule (0,1); "
@@ -158,6 +163,7 @@ def main() -> None:
         beta_delta=args.beta_delta,
         acq_strategy=args.acq_strategy,
         qnei_mc_samples=args.qnei_mc_samples,
+        kernel_type=args.kernel_type,
         candidates_path=args.candidates,
         skip_feature_selection=args.skip_feature_selection,
         strict_training_schema=args.strict_training_schema,

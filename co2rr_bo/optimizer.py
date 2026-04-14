@@ -163,6 +163,7 @@ class CO2RROptimizer:
         beta_delta: float = 0.1,
         acq_strategy: str = "ucb",
         qnei_mc_samples: int = 128,
+        kernel_type: str = "matern",
         candidates_path: Optional[str | Path] = None,
         n_restarts: int = 10,
         raw_samples: int = 256,
@@ -181,6 +182,7 @@ class CO2RROptimizer:
         self.beta_delta = beta_delta
         self.acq_strategy = acq_strategy.lower()
         self.qnei_mc_samples = int(qnei_mc_samples)
+        self.kernel_type = kernel_type
         self.candidates_path = (
             Path(candidates_path) if candidates_path else None
         )
@@ -408,6 +410,7 @@ class CO2RROptimizer:
         self.surrogate.fit(
             X_raw, Y_raw, self.selected_features,
             design_bounds=self.design_bounds,
+            kernel_type=self.kernel_type,
         )
         logger.info("Phase 2 complete.")
 
