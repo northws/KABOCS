@@ -1,4 +1,4 @@
-# KABO — Knowledge-Augmented Bayesian Optimization for Catalytic Systems
+# KABOCS — Knowledge-Augmented Bayesian Optimization for Catalytic Systems
 
 <p align="center">
   <strong>面向多类仿酶催化体系的可扩展贝叶斯优化平台（CO₂RR / OER / NRR …）</strong>
