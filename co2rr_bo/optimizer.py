@@ -245,6 +245,11 @@ class CO2RROptimizer:
             )
         if self.h2_penalty_weight < 0:
             raise ValueError("h2_penalty_weight must be >= 0.")
+        if not (np.isfinite(self.diversity_weight) and self.diversity_weight >= 0):
+            raise ValueError(
+                f"diversity_weight must be a finite non-negative number "
+                f"(got {self.diversity_weight})."
+            )
 
         if self.seed is not None:
             set_global_seed(self.seed)
@@ -949,6 +954,11 @@ class CO2RROptimizer:
             "pre_fill_before_choice": self.pre_fill_before_choice,
             "seed": self.seed,
             "selected_features": self.selected_features,
+            "diversity_weight": self.diversity_weight,
+            "kabo_mode": self.kabo_mode,
+            "lambda_p": self.lambda_p if self.kabo_mode else None,
+            "lambda_k": self.lambda_k if self.kabo_mode else None,
+            "expert_prior_file": str(self.expert_prior_file) if self.expert_prior_file else None,
             "n_rows_final": int(len(result_df)),
             "output_data": str(output_path),
         }

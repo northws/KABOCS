@@ -525,3 +525,54 @@ python run.py --diversity-weight 0.0 --non-interactive --iterations 1 --seed 42
 ```
 
 三种配置均通过，无异常。
+
+## 十七、对 §16 新改动的再次复审（2026-04-16）
+
+本节对 §16 的“diversity_weight 参数化”进行代码级复核与运行复验。
+
+### 17.1 复核结论
+
+1. `--diversity-weight` 已从 CLI 正确传递到推荐重排逻辑，参数链路完整。
+2. §16 声明的 3 条验证命令均可运行通过（默认/强多样性/无多样性）。
+3. 未发现阻断级回归（无 Traceback、NameError、NaN）。
+
+### 17.2 代码级证据
+
+1. CLI 参数定义：`co2rr_bo/cli.py` 新增 `--diversity-weight`。
+2. 优化器接收与透传：`co2rr_bo/optimizer.py` 的 `CO2RROptimizer.__init__()` 保存 `self.diversity_weight`，并在 `phase3_optimize()` 调用 `print_recommendations(..., diversity_weight=self.diversity_weight)`。
+3. 推荐函数生效：`co2rr_bo/acquisition.py` 的 `print_recommendations()` 用传入的 `diversity_weight` 参与贪心评分：
+	`acq_norm(i) + diversity_weight * min_L2_dist(i, selected)`。
+
+### 17.3 新增发现（低优先级）
+
+#### P2-1  `diversity_weight` 缺少参数有效性校验
+
+- 现状：`co2rr_bo/optimizer.py` 中直接赋值 `self.diversity_weight = diversity_weight`，但未检查有限性与下界。
+- 风险：若传入负值或非有限值（如 `nan`），菜单重排语义会偏离“多样性增强”，且行为不可解释。
+- 建议：增加 `isfinite` 与 `>= 0` 校验（上界可不限制）。
+
+#### P2-2  `run_metadata.json` 未记录 `diversity_weight`
+
+- 现状：`co2rr_bo/optimizer.py` 的 metadata 字段已记录 `acq_strategy/qnei_mc_samples/beta_schedule` 等，但未包含 `diversity_weight`。
+- 风险：后续复现实验时无法从元数据还原菜单重排配置。
+- 建议：在 metadata 中追加 `"diversity_weight": self.diversity_weight`。
+
+### 17.4 结论
+
+§16 的核心改动已正确落地并通过运行验证。当前仅剩“参数防呆 + 元数据可追溯”两项低优先级工程完善点。
+
+## 十八、§17 工程完善修复（2026-04-16）
+
+### 18.1 已修复项
+
+#### P2-1 ✅  `diversity_weight` 参数校验
+
+- 修改位置：`co2rr_bo/optimizer.py` — `__init__()` 参数验证区
+- 实现：`if not (np.isfinite(self.diversity_weight) and self.diversity_weight >= 0): raise ValueError(...)`
+- 验证：`--diversity-weight -0.5` 正确触发 `ValueError`
+
+#### P2-2 ✅  `run_metadata.json` 追加 KABO 与多样性字段
+
+- 修改位置：`co2rr_bo/optimizer.py` — `run()` metadata 字典
+- 新增字段：`diversity_weight`, `kabo_mode`, `lambda_p`, `lambda_k`, `expert_prior_file`
+- 验证：`--kabo-mode` 运行后 metadata 输出包含全部新字段
