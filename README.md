@@ -32,6 +32,7 @@
 | 🌲 **智能特征选择** | Random Forest 自动评估 19 个描述符的特征重要性，筛选 Top-K |
 | 🔬 **ARD Matérn 核** | `SingleTaskGP` + `ScaleKernel(MaternKernel(ν=2.5, ARD))`，每个特征独立学习长度尺度 |
 | 🎯 **多采集策略** | 支持 `UCB` 与 `qNEI`，覆盖低噪声与高噪声实验场景 |
+| 🧑‍🏫 **KABO 双重领域知识增强** | 引入 `Preference Learning` 与外挂 JSON `Expert Prior`，将领域经验作为先验偏差（KG）影响优化方向 |
 | 👨‍🔬 **Human-in-the-Loop** | 交互式 CLI 推荐实验方案 → 输入全部产物产量 → 自动更新模型 |
 | 📊 **离散候选评估** | 支持从候选 CSV 中评估离散设计空间（氨基酸、溶剂组合） |
 | 🖥️ **GPU/CPU 自适应** | 自动检测 CUDA 设备，支持 CPU 回退 |
@@ -182,6 +183,9 @@ python run.py --acq-strategy qnei --qnei-mc-samples 256 --seed 42
 # 使用谱混合核（CatBOX 启发）
 python run.py --kernel-type spectral_mixture --seed 42
 
+# 开启 Knowledge-Augmented Bayesian Optimization (KABO) 模式（基于偏好反馈与专家知识进行联合主导优化）
+python run.py --kabo-mode --lambda-p 5.0 --lambda-k 2.0 --expert-prior-file priors.json --seed 42
+
 # 选择性优化（惩罚 HER 副反应）
 python run.py --target-product CO --h2-penalty-weight 0.3 --seed 42
 
@@ -211,6 +215,10 @@ python -m co2rr_bo --non-interactive
 | `--skip-feature-selection` | `False` | 跳过 RF 特征筛选，直接使用全部 19 维特征（论文最小闭环模式） |
 | `--strict-training-schema` | `False` | 严格训练模式：要求训练数据具备完整 19/19 描述符，否则报错 |
 | `--pre-fill-before-choice` | `False` | 选点前补全连续候选的非选中特征，支持按完整 19 维配方比较 |
+| `--kabo-mode` | `False` | 启用带有专家领域偏好的 Knowledge-Augmented Bayesian Optimization 模式 |
+| `--lambda-p` | `1.0` | 控制历史选择偏好对采集函数的影响比例 |
+| `--lambda-k` | `1.0` | 控制专家先验（JSON 指定知识空间）对采集函数的影响比例 |
+| `--expert-prior-file`| `None` | (仅 KABO 模式) 定义专家先验知识边界与高斯重心的 JSON 文件路径 |
 | `--seed` | `None` | 全局随机种子，统一控制 NumPy/Torch/Python 随机性以提高复现稳定性 |
 | `--output-dir` | `output` | 输出文件目录 |
 | `--device` | `auto` | 设备选择：`auto`, `cpu`, `cuda` |
@@ -301,6 +309,12 @@ $$\alpha_{\text{UCB}}(x) = \mu(x) + \beta \cdot \sigma(x)$$
 其中 $\mu(x)$ 是 GP 后验均值，$\sigma(x)$ 是后验标准差，$\beta$ 控制探索-利用平衡。
 在 `--beta-schedule fixed` 下，使用常数 $\beta$；在 `--beta-schedule theory` 下，使用按用户 `beta` 缩放的 $\beta_t$；在 `--beta-schedule theory-strict` 下，使用纯理论 $\beta_t$。
 注：部分文献写作 $\mu + \sqrt{\beta_t}\sigma$；本实现采用 BoTorch 常见参数化 $\mu + \beta\sigma$。
+
+**KABO 联合采集函数（当启用 `--kabo-mode` 时激活）：**
+
+基于上述 UCB/qNEI 采集评分拓展了 `Preference Learning (偏好学习)` 和 `Knowledge Gradient / Expert Priors (专家先验)`，支持经验约束引导空间搜索：
+$$\alpha_{KABO}(x) = \alpha_{base}(x) + \lambda_p \cdot \text{Pref}(x) + \lambda_k \cdot \text{KG}_{\text{expert}}(x)$$
+通过历史候选选择的成对比较拟合得到 $\text{Pref}(x)$；依据引入的 `expert_prior_file` JSON 配置推演高斯或均匀距离得分作为 $\text{KG}_{\text{expert}}(x)$。当历史数据极少无法收敛偏好GP时，自动回退保障系统稳定运行。
 
 **qNEI 采集函数（适合高噪声实验）：**
 

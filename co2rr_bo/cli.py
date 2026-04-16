@@ -147,6 +147,29 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--kabo-mode", action="store_true",
+        help="Enable Knowledge-Augmented Bayesian Optimization mode",
+    )
+    parser.add_argument(
+        "--lambda-p", type=float, default=1.0,
+        help="Weight for preference model score in KABO (default: 1.0)",
+    )
+    parser.add_argument(
+        "--lambda-k", type=float, default=1.0,
+        help="Weight for expert prior score in KABO (default: 1.0)",
+    )
+    parser.add_argument(
+        "--expert-prior-file", type=str, default=None,
+        help="Path to JSON file containing expert priors (for KABO mode)",
+    )
+    parser.add_argument(
+        "--diversity-weight", type=float, default=0.5,
+        help=(
+            "Weight for diversity in Top-N recommendation menu "
+            "(0=pure score, 1=strong diversity; default: 0.5)"
+        ),
+    )
+    parser.add_argument(
         "--output-dir", type=str, default="output",
         help="Directory for output files (default: output)",
     )
@@ -179,6 +202,11 @@ def main() -> None:
         seed=args.seed,
         device=args.device,
         output_dir=args.output_dir,
+        kabo_mode=args.kabo_mode,
+        lambda_p=args.lambda_p,
+        lambda_k=args.lambda_k,
+        expert_prior_file=args.expert_prior_file,
+        diversity_weight=args.diversity_weight,
     )
 
     optimizer.run(

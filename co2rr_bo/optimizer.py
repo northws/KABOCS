@@ -40,6 +40,7 @@ import pandas as pd
 import torch
 
 from co2rr_bo.acquisition import (
+    build_kabo,
     build_qnei,
     build_ucb,
     evaluate_discrete_candidates,
@@ -76,6 +77,8 @@ from co2rr_bo.utils import (
     set_global_seed,
     unnormalize_x,
 )
+from co2rr_bo.preference import PreferenceModel
+from co2rr_bo.knowledge import ExpertPrior
 
 logger = get_logger(__name__)
 
@@ -182,6 +185,11 @@ class CO2RROptimizer:
         seed: Optional[int] = None,
         device: str = "auto",
         output_dir: str | Path = "output",
+        kabo_mode: bool = False,
+        lambda_p: float = 1.0,
+        lambda_k: float = 1.0,
+        expert_prior_file: Optional[str | Path] = None,
+        diversity_weight: float = 0.5,
     ) -> None:
         self.data_path = Path(data_path)
         self.top_k = top_k
@@ -204,6 +212,17 @@ class CO2RROptimizer:
         self.seed = seed
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.kabo_mode = kabo_mode
+        self.lambda_p = lambda_p
+        self.lambda_k = lambda_k
+        self.expert_prior_file = expert_prior_file
+        self.diversity_weight = diversity_weight
+        
+        if self.kabo_mode:
+            logger.info(
+                f"KABO Mode ENABLED: lambda_p={self.lambda_p}, lambda_k={self.lambda_k}"
+            )
 
         if self.beta_schedule not in {"fixed", "theory", "theory_strict"}:
             raise ValueError(
@@ -300,6 +319,8 @@ class CO2RROptimizer:
         self.selected_features: list[str] = []
         self.feature_importances: pd.Series = pd.Series(dtype=float)
         self.surrogate = SurrogateModel(self.device)
+        self.preference_model = PreferenceModel(self.device)
+        self.expert_prior: Optional[ExpertPrior] = None
 
         # Design-space bounds (can be customized)
         self.design_bounds: dict[str, tuple[float, float]] = dict(DESIGN_SPACE_BOUNDS)
@@ -510,6 +531,14 @@ class CO2RROptimizer:
         if self.surrogate.model is None:
             raise RuntimeError("Phase 2 must be run before Phase 3.")
 
+        if self.kabo_mode:
+            self.expert_prior = ExpertPrior(
+                config_path=self.expert_prior_file,
+                selected_features=self.selected_features,
+                bounds_raw=self.surrogate.bounds_raw,
+                device=self.device,
+            )
+
         self._discrete_candidates_df = load_discrete_candidates(
             self.candidates_path, self.selected_features
         )
@@ -536,6 +565,17 @@ class CO2RROptimizer:
                 acq_func = build_qnei(
                     self.surrogate.model,
                     num_mc_samples=self.qnei_mc_samples,
+                )
+
+            # 1.5 Wrap with KABO if enabled
+            if self.kabo_mode:
+                self.preference_model.fit()
+                acq_func = build_kabo(
+                    base_acq_func=acq_func,
+                    preference_model=self.preference_model,
+                    expert_prior=self.expert_prior,
+                    lambda_p=self.lambda_p,
+                    lambda_k=self.lambda_k,
                 )
 
             # 2. Optimize over continuous [0,1]^K
@@ -598,6 +638,7 @@ class CO2RROptimizer:
                     if interactive and self.pre_fill_before_choice
                     else None
                 ),
+                diversity_weight=self.diversity_weight,
             )
 
             # 5. Human-in-the-Loop: expert selects candidate
@@ -763,8 +804,37 @@ class CO2RROptimizer:
                     chosen_acq_value,
                 )
 
+            # KABO: Record preference comparisons for online learning.
+            # Both normal selection AND manual override generate pairs.
+            if self.kabo_mode:
+                if chosen_source == "manual_override":
+                    # Manual override is the strongest preference signal:
+                    # the expert rejected ALL recommended candidates.
+                    # Construct the normalised vector from norm_vals.
+                    manual_norm_tensor = torch.tensor(
+                        [norm_vals[f] for f in self.selected_features],
+                        dtype=torch.double,
+                        device=self.device,
+                    )
+                    losers_norm = [all_candidates[idx] for idx in top_indices]
+                    if losers_norm:
+                        self.preference_model.add_comparisons(
+                            winner_norm=manual_norm_tensor,
+                            losers_norm=losers_norm,
+                        )
+                elif chosen_idx in top_indices:
+                    losers_norm = [
+                        all_candidates[idx]
+                        for idx in top_indices
+                        if idx != chosen_idx
+                    ]
+                    self.preference_model.add_comparisons(
+                        winner_norm=all_candidates[chosen_idx],
+                        losers_norm=losers_norm,
+                    )
+
             self._append_observation(
-                record, product_yields
+                record, product_yields, iteration
             )
             logger.info("Dataset now has %d rows.", len(self.df))
 
@@ -780,6 +850,7 @@ class CO2RROptimizer:
         self,
         candidate_record: CandidateRecord,
         product_yields: dict[str, float],
+        iteration: int = -1,
     ) -> None:
         """Append a new observation using a CandidateRecord.
 
@@ -807,6 +878,10 @@ class CO2RROptimizer:
         # Fill all product yield columns
         for col_name in ALL_PRODUCT_COLUMNS:
             new_row[col_name] = product_yields.get(col_name, np.nan)
+            
+        new_row["expert_rank"] = candidate_record.expert_rank
+        if iteration >= 0:
+            new_row["bo_iteration"] = iteration
 
         self.df = pd.concat(
             [self.df, pd.DataFrame([new_row])],

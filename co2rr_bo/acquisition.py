@@ -34,8 +34,104 @@ from co2rr_bo.constants import (
     PRODUCT_NAMES,
 )
 from co2rr_bo.utils import get_logger, unnormalize_x
+from co2rr_bo.preference import PreferenceModel
+from co2rr_bo.knowledge import ExpertPrior
 
 logger = get_logger(__name__)
+
+class KABOAcquisition(AcquisitionFunction):
+    """Knowledge-Augmented Bayesian Optimization Acquisition Function.
+
+    Combines a base acquisition function (e.g. UCB or qNEI) with:
+      - A preference score:  λ_p · Pref(x)
+      - An expert prior score:  λ_k · Prior(x)
+
+    Each component is z-score normalised online (over the current
+    evaluation batch) before weighted combination so that no single
+    term dominates due to scale differences.
+    """
+
+    def __init__(
+        self,
+        base_acq_func: AcquisitionFunction,
+        preference_model: PreferenceModel,
+        expert_prior: ExpertPrior,
+        lambda_p: float = 1.0,
+        lambda_k: float = 1.0,
+    ):
+        super().__init__(model=base_acq_func.model)
+        self.base_acq_func = base_acq_func
+        self.preference_model = preference_model
+        self.expert_prior = expert_prior
+        self.lambda_p = lambda_p
+        self.lambda_k = lambda_k
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _zscore(t: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """Z-score normalise a 1-D tensor (mean=0, std=1).
+
+        Handles edge cases:
+        - Single-element tensor: returns zeros (no relative ranking).
+        - All-identical values (std ≈ 0): returns zeros.
+        - NaN from degenerate inputs: returns zeros.
+        """
+        if t.numel() <= 1:
+            return torch.zeros_like(t)
+        std, mean = torch.std_mean(t, unbiased=False)
+        if not torch.isfinite(std) or std < eps:
+            return torch.zeros_like(t)
+        return (t - mean) / (std + eps)
+
+    # ------------------------------------------------------------------
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        """Evaluate α_KABO(x) = z(α_base) + λ_p·z(Pref) + λ_k·z(Prior).
+
+        All three components are z-score normalised over the current
+        evaluation batch before combination.
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            Candidates, shape ``(... x q x d)`` as per BoTorch convention.
+        """
+        base_val = self.base_acq_func(X)  # shape: (batch,) or ()
+
+        # Preference / prior models work on 2-D (N, d) inputs.
+        d = X.shape[-1]
+        X_2d = X.reshape(-1, d)  # (N, d)
+
+        pref_score = self.preference_model.evaluate(X_2d).squeeze(-1)  # (N,)
+        prior_score = self.expert_prior.evaluate(X_2d).squeeze(-1)     # (N,)
+
+        # Reshape auxiliary scores to match base_val
+        pref_score = pref_score.reshape(base_val.shape)
+        prior_score = prior_score.reshape(base_val.shape)
+
+        # Online z-score normalisation — prevents any single term from
+        # dominating solely due to numeric scale differences.
+        base_z = self._zscore(base_val)
+        pref_z = self._zscore(pref_score)
+        prior_z = self._zscore(prior_score)
+
+        return base_z + self.lambda_p * pref_z + self.lambda_k * prior_z
+
+
+def build_kabo(
+    base_acq_func: AcquisitionFunction,
+    preference_model: PreferenceModel,
+    expert_prior: ExpertPrior,
+    lambda_p: float = 1.0,
+    lambda_k: float = 1.0,
+) -> KABOAcquisition:
+    """Construct KABO Acquisition function."""
+    return KABOAcquisition(
+        base_acq_func=base_acq_func,
+        preference_model=preference_model,
+        expert_prior=expert_prior,
+        lambda_p=lambda_p,
+        lambda_k=lambda_k,
+    )
 
 
 def build_ucb(model: SingleTaskGP, beta: float) -> UpperConfidenceBound:
@@ -369,7 +465,7 @@ def evaluate_discrete_candidates(
     ).unsqueeze(1)  # shape (N, 1, K) for q-batch
 
     with torch.no_grad():
-        acq_values = acq_func(X_tensor).cpu().numpy()
+        acq_values = acq_func(X_tensor).cpu().numpy().ravel()
 
     results = []
     sort_idx = np.argsort(acq_values)[::-1]
@@ -378,7 +474,7 @@ def evaluate_discrete_candidates(
             X_norm[idx], dtype=torch.double, device=device
         )
         # Map back to the original DataFrame row index
-        orig_row_idx = int(valid_full_indices[local_valid[idx]])
+        orig_row_idx = int(valid_full_indices[int(local_valid[idx])])
         results.append((cand_tensor, float(acq_values[idx]), orig_row_idx))
 
     return results
@@ -736,6 +832,7 @@ def print_recommendations(
     target_column: str,
     top_n: int = 3,
     continuous_nonselected_values: dict[str, float] | None = None,
+    diversity_weight: float = 0.5,
 ) -> list[int]:
     """Print top-N recommended experiments with full feature breakdown.
 
@@ -784,8 +881,54 @@ def print_recommendations(
     """
     target_name = PRODUCT_NAMES.get(target_column, target_column)
 
-    sorted_indices = np.argsort(acq_values)[::-1]
-    top_indices = sorted_indices[:top_n]
+    # ------------------------------------------------------------------
+    # Diversity-aware Top-N selection (greedy submodular)
+    #
+    # Following the "menu" concept from Astudillo & Frazier 2019, we
+    # present diverse candidates rather than the N highest-scoring
+    # (which may cluster in one region).
+    #
+    # Strategy:
+    #   Slot 1 = best acquisition value (unchanged).
+    #   Slot k = argmax_{i not selected} [  acq_norm(i)
+    #              + diversity_weight * min-L2-dist(i, selected) ]
+    # ------------------------------------------------------------------
+    # diversity_weight passed as parameter (0 = pure score, 1 = strong diversity)
+
+    n_cands = len(acq_values)
+    acq_arr = np.array(acq_values, dtype=float)
+
+    # Normalise acquisition values to [0, 1] for fair weighting
+    acq_min, acq_max = acq_arr.min(), acq_arr.max()
+    acq_range = acq_max - acq_min if acq_max > acq_min else 1.0
+    acq_norm = (acq_arr - acq_min) / acq_range
+
+    # Precompute candidate feature vectors as numpy for distance calc
+    cand_vecs = np.array([c.cpu().numpy() for c in candidates_norm])
+
+    selected: list[int] = []
+    remaining = set(range(n_cands))
+
+    for slot in range(min(top_n, n_cands)):
+        if slot == 0:
+            # First slot: pure best acquisition
+            best = int(np.argmax(acq_arr))
+        else:
+            best_score = -np.inf
+            best = -1
+            sel_vecs = cand_vecs[selected]  # (k, d)
+            for i in remaining:
+                # Minimum L2 distance to any already-selected candidate
+                dists = np.linalg.norm(sel_vecs - cand_vecs[i], axis=1)
+                min_dist = dists.min()
+                score = acq_norm[i] + diversity_weight * min_dist
+                if score > best_score:
+                    best_score = score
+                    best = i
+        selected.append(best)
+        remaining.discard(best)
+
+    top_indices = selected
 
     print("\n" + "=" * 65)
     print(f"  🔬 TOP {min(top_n, len(top_indices))} "
@@ -826,7 +969,7 @@ def print_recommendations(
                     print(f"    {feat:35s} = <to be provided by expert>")
 
     print("\n" + "-" * 65)
-    return top_indices.tolist()
+    return top_indices
 
 
 def print_best_found(
