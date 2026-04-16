@@ -190,6 +190,8 @@ class CO2RROptimizer:
         lambda_k: float = 1.0,
         expert_prior_file: Optional[str | Path] = None,
         diversity_weight: float = 0.5,
+        pe_budget: int = 0,
+        lambda_v: float = 0.0,
     ) -> None:
         self.data_path = Path(data_path)
         self.top_k = top_k
@@ -218,6 +220,8 @@ class CO2RROptimizer:
         self.lambda_k = lambda_k
         self.expert_prior_file = expert_prior_file
         self.diversity_weight = diversity_weight
+        self.pe_budget = pe_budget
+        self.lambda_v = lambda_v
         
         if self.kabo_mode:
             logger.info(
@@ -550,11 +554,70 @@ class CO2RROptimizer:
 
         K = len(self.selected_features)
         self._beta_trace = []
+        self._tie_count = 0
 
         for iteration in range(1, n_iterations + 1):
             logger.info("-" * 50)
             logger.info("BO Iteration %d / %d", iteration, n_iterations)
             logger.info("-" * 50)
+
+            # 0. Preference Exploration sub-loop (P1-B, PEBO-style)
+            #    Uses discrete candidates as the PE pool (available pre-iteration).
+            pe_pool: list[torch.Tensor] = []
+            if (
+                self.kabo_mode
+                and self.pe_budget > 0
+                and interactive
+                and self._discrete_candidates_df is not None
+            ):
+                for _, row in self._discrete_candidates_df.iterrows():
+                    vals = [row[f] for f in self.selected_features]
+                    raw_t = torch.tensor(vals, dtype=torch.double, device=self.device)
+                    norm_t = (raw_t - self.surrogate.bounds_raw[0]) / (
+                        self.surrogate.bounds_raw[1] - self.surrogate.bounds_raw[0]
+                    )
+                    pe_pool.append(norm_t)
+
+            if len(pe_pool) >= 2 and self.pe_budget > 0:
+                pe_queries = self.preference_model.generate_pe_queries(
+                    pe_pool, n_queries=self.pe_budget
+                )
+                for q_idx, (a, b) in enumerate(pe_queries, 1):
+                    cand_a = pe_pool[a]
+                    cand_b = pe_pool[b]
+                    cand_a_raw = unnormalize_x(cand_a, self.surrogate.bounds_raw)
+                    cand_b_raw = unnormalize_x(cand_b, self.surrogate.bounds_raw)
+
+                    print(f"\n  🎯 PE Query {q_idx}/{len(pe_queries)}:")
+                    print(f"     Option A: {dict(zip(self.selected_features, [f'{v:.3f}' for v in cand_a_raw.tolist()]))}")
+                    print(f"     Option B: {dict(zip(self.selected_features, [f'{v:.3f}' for v in cand_b_raw.tolist()]))}")
+                    print("     Enter 'a', 'b', or 'tie':")
+
+                    while True:
+                        try:
+                            ans = input("     PE choice: ").strip().lower()
+                            if ans in ("a", "1"):
+                                self.preference_model.add_comparisons(
+                                    winner_norm=cand_a, losers_norm=[cand_b]
+                                )
+                                logger.info("PE query %d: A preferred.", q_idx)
+                                break
+                            elif ans in ("b", "2"):
+                                self.preference_model.add_comparisons(
+                                    winner_norm=cand_b, losers_norm=[cand_a]
+                                )
+                                logger.info("PE query %d: B preferred.", q_idx)
+                                break
+                            elif ans in ("tie", "t"):
+                                logger.info("PE query %d: Tie — skipped.", q_idx)
+                                break
+                            else:
+                                print("     ⚠ Enter 'a', 'b', or 'tie'.")
+                        except (EOFError, KeyboardInterrupt):
+                            break
+
+                # Re-fit preference model after PE queries
+                self.preference_model.fit()
 
             # 1. Build acquisition function
             if self.acq_strategy == "ucb":
@@ -581,6 +644,7 @@ class CO2RROptimizer:
                     expert_prior=self.expert_prior,
                     lambda_p=self.lambda_p,
                     lambda_k=self.lambda_k,
+                    lambda_v=self.lambda_v,
                 )
 
             # 2. Optimize over continuous [0,1]^K
@@ -651,6 +715,7 @@ class CO2RROptimizer:
             manual_raw_vals: Optional[dict[str, float]] = None
             overrides: list[str] = []
             oob_count = 0
+            is_tie = False
             if interactive:
                 # Expert chooses which candidate to execute
                 chosen_idx = prompt_user_candidate_choice(
@@ -659,6 +724,18 @@ class CO2RROptimizer:
                 if chosen_idx is None:
                     logger.info("User requested exit.")
                     break
+
+                # Tie: expert declares candidates equally good.
+                # Execute Rank #1 but do NOT record preference comparisons.
+                is_tie = (chosen_idx == -2)
+                if is_tie:
+                    self._tie_count += 1
+                    chosen_idx = top_indices[0]
+                    logger.info(
+                        "Tie declared (count=%d). Auto-selecting Rank #1 but "
+                        "skipping preference recording.",
+                        self._tie_count,
+                    )
 
                 if chosen_idx == -1:
                     manual_payload = prompt_user_manual_candidate(
@@ -811,7 +888,8 @@ class CO2RROptimizer:
 
             # KABO: Record preference comparisons for online learning.
             # Both normal selection AND manual override generate pairs.
-            if self.kabo_mode:
+            # Tie declarations are explicitly skipped.
+            if self.kabo_mode and not is_tie:
                 if chosen_source == "manual_override":
                     # Manual override is the strongest preference signal:
                     # the expert rejected ALL recommended candidates.
@@ -956,6 +1034,9 @@ class CO2RROptimizer:
             "selected_features": self.selected_features,
             "diversity_weight": self.diversity_weight,
             "kabo_mode": self.kabo_mode,
+            "tie_count": self._tie_count,
+            "pe_budget": self.pe_budget,
+            "lambda_v": self.lambda_v,
             "lambda_p": self.lambda_p if self.kabo_mode else None,
             "lambda_k": self.lambda_k if self.kabo_mode else None,
             "expert_prior_file": str(self.expert_prior_file) if self.expert_prior_file else None,

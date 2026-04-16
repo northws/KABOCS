@@ -170,6 +170,20 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--pe-budget", type=int, default=0,
+        help=(
+            "Number of preference exploration queries per iteration "
+            "(KABO mode; 0=disabled; default: 0)"
+        ),
+    )
+    parser.add_argument(
+        "--lambda-v", type=float, default=0.0,
+        help=(
+            "Weight for approximate VOI term in KABO acquisition "
+            "(0=disabled; default: 0.0)"
+        ),
+    )
+    parser.add_argument(
         "--output-dir", type=str, default="output",
         help="Directory for output files (default: output)",
     )
@@ -207,6 +221,8 @@ def main() -> None:
         lambda_k=args.lambda_k,
         expert_prior_file=args.expert_prior_file,
         diversity_weight=args.diversity_weight,
+        pe_budget=args.pe_budget,
+        lambda_v=args.lambda_v,
     )
 
     optimizer.run(

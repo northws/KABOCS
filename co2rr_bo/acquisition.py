@@ -45,10 +45,15 @@ class KABOAcquisition(AcquisitionFunction):
     Combines a base acquisition function (e.g. UCB or qNEI) with:
       - A preference score:  λ_p · Pref(x)
       - An expert prior score:  λ_k · Prior(x)
+      - An approximate VOI score:  λ_v · VOI(x)  (posterior variance proxy)
 
     Each component is z-score normalised online (over the current
     evaluation batch) before weighted combination so that no single
     term dominates due to scale differences.
+
+    The VOI term is a lightweight approximation of the Knowledge Gradient
+    (Wu & Frazier 2016): it uses the surrogate posterior variance as an
+    information-value proxy rather than a full one-step lookahead.
     """
 
     def __init__(
@@ -58,6 +63,7 @@ class KABOAcquisition(AcquisitionFunction):
         expert_prior: ExpertPrior,
         lambda_p: float = 1.0,
         lambda_k: float = 1.0,
+        lambda_v: float = 0.0,
     ):
         super().__init__(model=base_acq_func.model)
         self.base_acq_func = base_acq_func
@@ -65,6 +71,7 @@ class KABOAcquisition(AcquisitionFunction):
         self.expert_prior = expert_prior
         self.lambda_p = lambda_p
         self.lambda_k = lambda_k
+        self.lambda_v = lambda_v
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -114,7 +121,19 @@ class KABOAcquisition(AcquisitionFunction):
         pref_z = self._zscore(pref_score)
         prior_z = self._zscore(prior_score)
 
-        return base_z + self.lambda_p * pref_z + self.lambda_k * prior_z
+        combined = base_z + self.lambda_p * pref_z + self.lambda_k * prior_z
+
+        # Approximate VOI: use surrogate posterior variance as information
+        # value proxy (cf. Wu & Frazier 2016 KG motivation).
+        if self.lambda_v > 0:
+            with torch.no_grad():
+                posterior = self.model.posterior(X_2d)
+                voi_score = posterior.variance.squeeze(-1)  # (N,)
+                voi_score = voi_score.reshape(base_val.shape)
+            voi_z = self._zscore(voi_score)
+            combined = combined + self.lambda_v * voi_z
+
+        return combined
 
 
 def build_kabo(
@@ -123,6 +142,7 @@ def build_kabo(
     expert_prior: ExpertPrior,
     lambda_p: float = 1.0,
     lambda_k: float = 1.0,
+    lambda_v: float = 0.0,
 ) -> KABOAcquisition:
     """Construct KABO Acquisition function."""
     return KABOAcquisition(
@@ -131,6 +151,7 @@ def build_kabo(
         expert_prior=expert_prior,
         lambda_p=lambda_p,
         lambda_k=lambda_k,
+        lambda_v=lambda_v,
     )
 
 
@@ -565,7 +586,8 @@ def prompt_user_candidate_choice(
     -------
     int or None
         The chosen candidate index (in all_candidates list),
-        ``-1`` for manual override, or ``None`` if the user wants to exit.
+        ``-1`` for manual override, ``-2`` for tie (no preference),
+        or ``None`` if the user wants to exit.
     """
     _ = n_total  # reserved for future UI expansion
 
@@ -573,6 +595,7 @@ def prompt_user_candidate_choice(
     print("  │  🔬 SELECT CANDIDATE TO EXECUTE                    │")
     print("  │     Enter rank number (1, 2, 3, ...)               │")
     print("  │     Press Enter to accept Rank #1 (default)        │")
+    print("  │     Enter 'tie' if candidates are equally good     │")
     print("  │     Enter 'manual' to override all candidates      │")
     print("  │     Enter 'exit' to stop optimization              │")
     print("  └─────────────────────────────────────────────────────┘")
@@ -587,6 +610,10 @@ def prompt_user_candidate_choice(
             if user_input.lower() in ("manual", "override", "m"):
                 logger.info("Expert chose manual override mode.")
                 return -1
+
+            if user_input.lower() in ("tie", "t", "equal"):
+                logger.info("Expert declared tie — no preference recorded.")
+                return -2
 
             if user_input == "":
                 # Default: accept rank #1

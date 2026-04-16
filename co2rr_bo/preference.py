@@ -173,3 +173,66 @@ class PreferenceModel:
             samples = posterior.rsample(torch.Size([n_mc_samples]))  # (S, ..., 1)
             pref_score = samples.mean(dim=0)  # (..., 1)
         return pref_score
+
+    # ------------------------------------------------------------------
+    # Preference Exploration (PE) query generation — cf. Lin et al. 2022
+    # ------------------------------------------------------------------
+    def generate_pe_queries(
+        self,
+        candidates_norm: list[torch.Tensor],
+        n_queries: int = 1,
+    ) -> list[tuple[int, int]]:
+        """Generate informative pairwise queries for Preference Exploration.
+
+        Implements the *uncertainty* strategy from PEBO (Lin et al. 2022):
+        select candidate pairs where the preference model is most uncertain
+        (highest posterior variance) and the predicted preference difference
+        is smallest (hardest to distinguish).
+
+        Parameters
+        ----------
+        candidates_norm : list[torch.Tensor]
+            Pool of normalised candidate vectors.
+        n_queries : int
+            Number of pairwise queries to generate.
+
+        Returns
+        -------
+        list[tuple[int, int]]
+            List of (idx_a, idx_b) pairs into ``candidates_norm``.
+        """
+        n = len(candidates_norm)
+        if n < 2 or n_queries <= 0:
+            return []
+
+        if not self.has_valid_model or self.model is None:
+            # No preference model yet — pick random pairs for cold start
+            rng = np.random.default_rng()
+            pairs = []
+            for _ in range(min(n_queries, n * (n - 1) // 2)):
+                a, b = rng.choice(n, size=2, replace=False)
+                pairs.append((int(a), int(b)))
+            return pairs
+
+        # Score all candidates: higher variance = more informative
+        X = torch.stack(candidates_norm).to(torch.double).to(self.device)
+        with torch.no_grad():
+            posterior = self.model.posterior(X)
+            means = posterior.mean.squeeze(-1)      # (n,)
+            variances = posterior.variance.squeeze(-1)  # (n,)
+
+        # For each pair (i, j), compute an information score:
+        #   info(i,j) = var(i) + var(j)  (high uncertainty)
+        #             - |mean(i) - mean(j)|  (close predictions = harder)
+        scored_pairs: list[tuple[float, int, int]] = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                info = (
+                    variances[i].item() + variances[j].item()
+                    - abs(means[i].item() - means[j].item())
+                )
+                scored_pairs.append((info, i, j))
+
+        # Sort descending by info score, take top-n_queries
+        scored_pairs.sort(key=lambda x: x[0], reverse=True)
+        return [(p[1], p[2]) for p in scored_pairs[:n_queries]]
