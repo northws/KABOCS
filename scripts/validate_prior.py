@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 """Prior Predictive Check & Validation Tool.
 
-Validates a JSON prior file against the design space, checks parameter
-sanity, and runs a prior predictive check by sampling from the specified
-distributions.
+Validates a JSON prior file against the active Task's design space,
+checks parameter sanity, and runs a prior predictive check by sampling
+from the specified distributions.
 
 Usage:
-    python scripts/validate_prior.py priors/my_prior.json [--n-samples 1000]
+    python scripts/validate_prior.py priors/my_prior.json [--task co2rr] \
+        [--n-samples 1000]
 
-Output is printed to stdout and optionally saved to output/prior_checks/.
+Output is printed to stdout and saved to output/prior_checks/.
 """
 
 from __future__ import annotations
@@ -23,11 +24,24 @@ import numpy as np
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from co2rr_bo.constants import DESIGN_SPACE_BOUNDS
+from kabo.task import get_task
 
 
-def validate_prior(config_path: str, n_samples: int = 1000) -> bool:
+def validate_prior(
+    config_path: str,
+    design_bounds: dict[str, tuple[float, float]],
+    n_samples: int = 1000,
+) -> bool:
     """Validate a prior JSON file and run prior predictive check.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to the prior JSON file.
+    design_bounds : dict[str, tuple[float, float]]
+        Design-space bounds supplied by the active Task.
+    n_samples : int
+        Number of samples for the prior predictive check.
 
     Returns True if all checks pass, False otherwise.
     """
@@ -59,11 +73,14 @@ def validate_prior(config_path: str, n_samples: int = 1000) -> bool:
         evidence = params.get("evidence", "none")
 
         # Check if feature is in design space
-        if feat not in DESIGN_SPACE_BOUNDS:
-            warnings.append(f"  ⚠ '{feat}' not in DESIGN_SPACE_BOUNDS — ignored at runtime")
+        if feat not in design_bounds:
+            warnings.append(
+                f"  ⚠ '{feat}' not in the active task's design bounds — "
+                "ignored at runtime"
+            )
             continue
 
-        lo, hi = DESIGN_SPACE_BOUNDS[feat]
+        lo, hi = design_bounds[feat]
         report = {"feature": feat, "type": ptype, "confidence": confidence}
 
         if ptype == "gaussian":
@@ -164,12 +181,21 @@ def main():
     parser = argparse.ArgumentParser(description="Validate expert prior JSON")
     parser.add_argument("config", help="Path to prior JSON file")
     parser.add_argument(
+        "--task", type=str, default="co2rr",
+        help="Active task name (default: co2rr). Determines which design "
+             "bounds are used for validation.",
+    )
+    parser.add_argument(
         "--n-samples", type=int, default=1000,
         help="Number of samples for prior predictive check (default: 1000)"
     )
     args = parser.parse_args()
 
-    ok = validate_prior(args.config, args.n_samples)
+    task = get_task(args.task)
+    design_bounds = task.design_space_bounds()
+    print(f"\n[validate_prior] Active task: {task.task_name()}")
+
+    ok = validate_prior(args.config, design_bounds, args.n_samples)
     sys.exit(0 if ok else 1)
 
 

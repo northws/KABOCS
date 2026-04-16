@@ -2,8 +2,8 @@
 Phase 1: Feature Weight Evaluation & Selection.
 
 Trains a Random Forest to evaluate nonlinear relationships between
-the 19 physicochemical descriptors and the selected target product
-yield, then selects the top-K most important features.
+the descriptors declared by the active Task and the selected target
+product yield, then selects the top-K most important features.
 """
 
 from __future__ import annotations
@@ -15,14 +15,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
-from co2rr_bo.constants import (
-    ALL_FEATURE_COLUMNS,
-    ALL_PRODUCT_COLUMNS,
-    PRODUCT_COLUMNS,
-    PRODUCT_NAMES,
-    TARGET_COLUMN,
-)
-from co2rr_bo.utils import get_logger
+from kabo.utils import get_logger
 
 logger = get_logger(__name__)
 
@@ -30,6 +23,9 @@ logger = get_logger(__name__)
 def load_and_validate_data(
     data_path: Path,
     target_column: str,
+    all_feature_columns: list[str],
+    all_product_columns: list[str],
+    product_names: dict[str, str],
     strict_feature_schema: bool = False,
 ) -> pd.DataFrame:
     """Load dataset from CSV and validate required columns.
@@ -43,9 +39,15 @@ def load_and_validate_data(
         Path to the CSV file.
     target_column : str
         Name of the target column to optimize (e.g. ``"Y_CO"``).
+    all_feature_columns : list[str]
+        Full ordered descriptor list (supplied by the active Task).
+    all_product_columns : list[str]
+        Ordered list of every product yield column (supplied by Task).
+    product_names : dict[str, str]
+        Mapping column → display name (supplied by Task).
     strict_feature_schema : bool, optional
-        If True, require all 19 descriptor columns in
-        ``ALL_FEATURE_COLUMNS`` to be present (default False).
+        If True, require every descriptor in ``all_feature_columns`` to
+        be present (default False).
 
     Returns
     -------
@@ -68,25 +70,25 @@ def load_and_validate_data(
                 n_rows, n_cols, data_path.name)
 
     # Validate feature columns
-    available_features = [c for c in ALL_FEATURE_COLUMNS if c in df.columns]
+    available_features = [c for c in all_feature_columns if c in df.columns]
     if not available_features:
         raise ValueError(
             f"No recognized feature columns found in dataset. "
-            f"Expected some of: {ALL_FEATURE_COLUMNS}"
+            f"Expected some of: {all_feature_columns}"
         )
-    missing_features = [c for c in ALL_FEATURE_COLUMNS if c not in df.columns]
+    missing_features = [c for c in all_feature_columns if c not in df.columns]
     if strict_feature_schema and missing_features:
         raise ValueError(
             "Strict training schema is enabled, but the dataset is missing "
             f"{len(missing_features)} descriptor columns: {missing_features}. "
-            "Please provide a complete 19/19 descriptor schema or disable "
+            "Please provide a complete descriptor schema or disable "
             "strict mode."
         )
     if (not strict_feature_schema) and missing_features:
         logger.warning(
             "Dataset is missing %d / %d descriptor columns; continuing with "
             "available feature subset.",
-            len(missing_features), len(ALL_FEATURE_COLUMNS),
+            len(missing_features), len(all_feature_columns),
         )
 
     # Validate target column
@@ -97,22 +99,23 @@ def load_and_validate_data(
         )
 
     # Report available product columns
-    available_products = [c for c in ALL_PRODUCT_COLUMNS if c in df.columns]
+    available_products = [c for c in all_product_columns if c in df.columns]
     if available_products:
-        product_names = [PRODUCT_NAMES.get(c, c) for c in available_products]
-        logger.info("Available products: %s", ", ".join(product_names))
+        product_name_list = [product_names.get(c, c) for c in available_products]
+        logger.info("Available products: %s", ", ".join(product_name_list))
     else:
         logger.info("Using single-target column: %s", target_column)
 
     logger.info("Optimization target: %s", target_column)
     logger.info("Available features: %d / %d",
-                len(available_features), len(ALL_FEATURE_COLUMNS))
+                len(available_features), len(all_feature_columns))
     return df
 
 
 def train_random_forest(
     df: pd.DataFrame,
     target_column: str,
+    all_feature_columns: list[str],
     n_estimators: int = 200,
     random_state: int = 42,
 ) -> tuple[RandomForestRegressor, pd.Series, list[str]]:
@@ -124,6 +127,8 @@ def train_random_forest(
         Dataset with feature columns and target.
     target_column : str
         Name of the target column to train on.
+    all_feature_columns : list[str]
+        Full ordered descriptor list (supplied by the active Task).
     n_estimators : int, optional
         Number of trees (default 200). Automatically reduced
         for small datasets (<10 rows).
@@ -136,7 +141,7 @@ def train_random_forest(
     tuple[RandomForestRegressor, pd.Series, list[str]]
         ``(rf_model, sorted_importances, available_features)``.
     """
-    available_features = [c for c in ALL_FEATURE_COLUMNS if c in df.columns]
+    available_features = [c for c in all_feature_columns if c in df.columns]
     n_rows = len(df)
 
     # Handle edge case: very small dataset (<10 rows)
@@ -214,6 +219,8 @@ def plot_feature_importances(
     top_k: int,
     output_dir: Path,
     target_column: str = "",
+    product_names: dict[str, str] | None = None,
+    task_name: str = "",
 ) -> Path:
     """Generate and save a bar plot of feature importances.
 
@@ -227,6 +234,10 @@ def plot_feature_importances(
         Directory to save the plot.
     target_column : str, optional
         Target column name for the plot title.
+    product_names : dict[str, str] or None, optional
+        Mapping column → display name (supplied by Task).
+    task_name : str, optional
+        Active task name, used as a title prefix (e.g. ``"CO2RR"``).
 
     Returns
     -------
@@ -252,9 +263,12 @@ def plot_feature_importances(
     ax.set_xlabel("Importance", fontsize=11)
 
     # Include target product in title
-    target_label = PRODUCT_NAMES.get(target_column, target_column)
+    if product_names is None:
+        product_names = {}
+    target_label = product_names.get(target_column, target_column)
+    title_prefix = f"{task_name} " if task_name else ""
     ax.set_title(
-        f"CO2RR Feature Importances — target: {target_label} (Random Forest)",
+        f"{title_prefix}Feature Importances — target: {target_label} (Random Forest)",
         fontsize=13, fontweight="bold",
     )
 

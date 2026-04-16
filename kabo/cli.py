@@ -1,46 +1,58 @@
 """
-CLI entry point for the CO2RR Bayesian Optimization pipeline.
+CLI entry point for the KABO Bayesian Optimization pipeline.
+
+The CLI is **task-aware**: pass ``--task <name>`` to select the active
+system (default: ``co2rr``).  All downstream behaviour — feature schema,
+product columns, default target, interactive prompts — is supplied by
+the corresponding ``TaskBase`` implementation registered via
+``kabo.task.register_task``.
 
 Usage::
 
-    python -m co2rr_bo                                 # Interactive, optimize CO
-    python -m co2rr_bo --target-product HCOOH          # Optimize formic acid
-    python -m co2rr_bo --non-interactive                # Demo mode
-    python -m co2rr_bo --data data/data.csv             # Custom data
-    python -m co2rr_bo --top-k 8 --beta 3.0            # Custom params
+    python -m kabo                                   # CO2RR, default target
+    python -m kabo --task co2rr --target-product HCOOH
+    python -m kabo --task test --non-interactive     # minimal TestTask smoke
+    python -m kabo --non-interactive                 # Demo mode
+    python -m kabo --data data/data.csv              # Custom data
+    python -m kabo --top-k 8 --beta 3.0             # Custom params
 """
 
 from __future__ import annotations
 
 import argparse
 
-from co2rr_bo.constants import DEFAULT_TARGET_PRODUCT, PRODUCT_COLUMNS
-from co2rr_bo.optimizer import CO2RROptimizer
+from kabo.optimizer import KABOOptimizer
+from kabo.task import TASK_REGISTRY, get_task
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    valid_products = ", ".join(PRODUCT_COLUMNS.keys())
+    registered_tasks = ", ".join(sorted(TASK_REGISTRY.keys()))
 
     parser = argparse.ArgumentParser(
         description=(
-            "CO2RR Bayesian Optimization Pipeline "
+            "KABO Bayesian Optimization Pipeline "
             "(default: engineering-enhanced mode with RF feature selection)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
-CO2RR Products:
-  {valid_products}
+Registered tasks:
+  {registered_tasks}
 
 Examples:
-  python -m co2rr_bo                                # Optimize CO (default)
-  python -m co2rr_bo --target-product HCOOH         # Optimize formic acid
-  python -m co2rr_bo --target-product CH4            # Optimize methane
-  python -m co2rr_bo --non-interactive               # Demo mode
-  python -m co2rr_bo --data data/data.csv            # Custom data
-  python -m co2rr_bo --top-k 8 --beta 3.0           # Custom params
+  python -m kabo                                     # Optimize CO (CO2RR default)
+  python -m kabo --task co2rr --target-product HCOOH # Optimize formic acid
+  python -m kabo --task test --non-interactive       # Minimal test task
+  python -m kabo --non-interactive                   # Demo mode
+  python -m kabo --data data/data.csv                # Custom data
+  python -m kabo --top-k 8 --beta 3.0               # Custom params
   python run.py --candidates data/candidates.csv     # With discrete candidates
         """,
+    )
+    parser.add_argument(
+        "--task", type=str, default="co2rr",
+        help=f"Active system task (default: co2rr). "
+             f"Registered: {registered_tasks}",
     )
     parser.add_argument(
         "--data", type=str, default="data/data.csv",
@@ -48,12 +60,15 @@ Examples:
     )
     parser.add_argument(
         "--candidates", type=str, default="data/candidates.csv",
-        help="Path to discrete candidates CSV (default: data/candidates.csv)",
+        help="Path to discrete candidates CSV (default: data/candidates.csv). "
+             "Pass 'none' (or an empty string) to skip discrete candidates "
+             "entirely — useful when switching tasks whose schema differs "
+             "from the default CO2RR candidates file.",
     )
     parser.add_argument(
-        "--target-product", type=str, default=DEFAULT_TARGET_PRODUCT,
-        help=f"Product to optimize: {valid_products} "
-             f"(default: {DEFAULT_TARGET_PRODUCT})",
+        "--target-product", type=str, default=None,
+        help="Product to optimize (task-specific; defaults to the active "
+             "task's default product).",
     )
     parser.add_argument(
         "--top-k", type=int, default=10,
@@ -100,7 +115,7 @@ Examples:
         "--h2-penalty-weight", type=float, default=0.0,
         help=(
             "If > 0, optimize composite target: target - weight * Y_H2 "
-            "to discourage HER (default: 0.0)"
+            "to discourage HER (CO2RR-specific; default: 0.0)"
         ),
     )
     parser.add_argument(
@@ -121,15 +136,15 @@ Examples:
     parser.add_argument(
         "--skip-feature-selection", action="store_true",
         help=(
-            "Skip RF feature selection and use all 19 features directly "
-            "(paper-minimal BO mode)"
+            "Skip RF feature selection and use all task-declared features "
+            "directly (paper-minimal BO mode)"
         ),
     )
     parser.add_argument(
         "--strict-training-schema", action="store_true",
         help=(
-            "Require all 19 descriptor columns in training data "
-            "(paper reproduction strict mode)"
+            "Require every task-declared descriptor column in training "
+            "data (paper reproduction strict mode)"
         ),
     )
     parser.add_argument(
@@ -195,12 +210,28 @@ Examples:
 
 
 def main() -> None:
-    """Main entry point for the CO2RR optimization pipeline."""
+    """Main entry point for the KABO optimization pipeline."""
     args = parse_args()
 
-    optimizer = CO2RROptimizer(
+    task = get_task(args.task)
+    # Let the task choose the default target when user did not specify.
+    target_product = (
+        args.target_product
+        if args.target_product is not None
+        else task.default_target()
+    )
+
+    # Resolve --candidates: 'none'/'' => skip discrete candidates entirely.
+    candidates_path = args.candidates
+    if candidates_path is not None and candidates_path.strip().lower() in {
+        "", "none", "null"
+    }:
+        candidates_path = None
+
+    optimizer = KABOOptimizer(
         data_path=args.data,
-        target_product=args.target_product,
+        task=task,
+        target_product=target_product,
         top_k=args.top_k,
         beta=args.beta,
         beta_schedule=args.beta_schedule,
@@ -209,7 +240,7 @@ def main() -> None:
         qnei_mc_samples=args.qnei_mc_samples,
         kernel_type=args.kernel_type,
         h2_penalty_weight=args.h2_penalty_weight,
-        candidates_path=args.candidates,
+        candidates_path=candidates_path,
         skip_feature_selection=args.skip_feature_selection,
         strict_training_schema=args.strict_training_schema,
         pre_fill_before_choice=args.pre_fill_before_choice,
