@@ -11,74 +11,14 @@
   <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License">
 </p>
 
----
+## 文档说明
+[技术报告-/docs/report.pdf](/docs/report.pdf)
 
-## 📖 概述
+[数据说明-/docs/data.md](/docs/data.md)
 
-本项目实现了一套完整的**贝叶斯优化 (Bayesian Optimization, BO)** Python 流水线，用于高效优化**光催化 CO₂ 还原反应 (CO₂RR)** 体系。催化剂为**二肽修饰的单层卟啉 MOF**，涉及 19 个物理化学描述符和 7 种产物的产量/法拉第效率优化。
+[参数说明-/docs/Parameters.md](/docs/Parameters.md)
 
-本实现严格遵循以下方法论：
-
-> **"Efficient and Principled Scientific Discovery through Bayesian Optimization: A Tutorial"**
-> *(arXiv:2604.01328v3)*
-
-核心技术栈：`BoTorch` (UCB/qNEI 采集函数) + `GPyTorch` (高斯过程代理模型) + `scikit-learn` (随机森林特征选择)。
-
-### 核心特性
-
-| 特性 | 描述 |
-|------|------|
-| 🧪 **多产物优化** | 支持 CO、HCOOH、CH₄、C₂H₄、CH₃OH、C₂H₅OH、H₂ 七种 CO₂RR 产物 |
-| 🌲 **智能特征选择** | Random Forest 自动评估 19 个描述符的特征重要性，筛选 Top-K |
-| 🔬 **ARD Matérn 核** | `SingleTaskGP` + `ScaleKernel(MaternKernel(ν=2.5, ARD))`，每个特征独立学习长度尺度 |
-| 🎯 **多采集策略** | 支持 `UCB` 与 `qNEI`，覆盖低噪声与高噪声实验场景 |
-| 🧑‍🏫 **KABO 双重领域知识增强** | 引入 `Preference Learning` 与外挂 JSON `Expert Prior`，将领域经验作为先验偏差（KG）影响优化方向 |
-| 👨‍🔬 **Human-in-the-Loop** | 交互式 CLI 推荐实验方案 → 输入全部产物产量 → 自动更新模型 |
-| 📊 **离散候选评估** | 支持从候选 CSV 中评估离散设计空间（氨基酸、溶剂组合） |
-| 🖥️ **GPU/CPU 自适应** | 自动检测 CUDA 设备，支持 CPU 回退 |
-
----
-
-## 📁 项目结构
-
-```
-Bayesian-Optimization-in-CO2RR/
-│
-├── run.py                      # 入口脚本
-├── requirements.txt            # Python 依赖
-├── prompt.md                   # 需求文档
-│
-├── co2rr_bo/                   # 核心 Python 包
-│   ├── __init__.py             # 包入口，导出 CO2RROptimizer
-│   ├── __main__.py             # 支持 python -m co2rr_bo
-│   ├── constants.py            # 19个描述符 + 7种产物列常量定义
-│   ├── utils.py                # 日志、设备选择、归一化/标准化工具
-│   ├── feature_selection.py    # Phase 1: 随机森林特征重要性评估与选择
-│   ├── surrogate.py            # Phase 2: GP 代理模型 (SingleTaskGP + ARD Matérn)
-│   ├── acquisition.py          # Phase 3: UCB/qNEI 采集函数 + 人机交互 CLI
-│   ├── optimizer.py            # CO2RROptimizer 编排器
-│   └── cli.py                  # 命令行参数解析
-│
-├── data/                       # 数据文件
-│   ├── data.csv                # 训练数据集 (19 描述符 + 7 产物产量)
-│   └── candidates.csv          # 离散候选实验向量
-│
-├── output/                     # 输出目录 (自动生成)
-│   ├── feature_importances.png # 特征重要性图
-│   └── data_updated.csv        # 更新后的数据集
-│
-├── reference/                  # 参考文献 PDF（arXiv）
-└── arXiv-2604.01328v3/         # 参考论文 LaTeX 源文件
-```
-
----
-
-## 🚀 快速开始
-
-### 0. 正式入口（重要）
-
-- 正式维护入口仅有：`python run.py` 或 `python -m co2rr_bo`
-- 论文复现与审计建议使用正式入口，避免双实现分叉带来的结果偏差
+## 快速开始
 
 ### 1. 环境配置
 
@@ -102,52 +42,6 @@ pip install -r requirements.txt
 | `pandas` | ≥ 2.0 | 数据加载与处理 |
 | `numpy` | ≥ 1.24 | 数值计算 |
 | `matplotlib` | ≥ 3.7 | 可视化绘图 |
-
-### 2. 准备数据
-
-将实验数据整理为 CSV 格式，放入 `data/data.csv`。**必需列：**
-
-**19 个输入描述符：**
-
-| 类别 | 描述符列名 | 物理含义 | 单位 |
-|------|-----------|---------|------|
-| 氨基酸 A | `A_pI` | 等电点 | pH (无量纲) |
-| | `A_distance` | 侧链到金属节点长度 | Å (埃) |
-| | `A_hbond_acceptors` | 氢键受体数 | 个 (无量纲) |
-| | `A_hbond_donors` | 氢键供体数 | 个 (无量纲) |
-| 氨基酸 B | `B_pI` | 等电点 | pH (无量纲) |
-| | `B_distance` | 侧链到金属节点长度 | Å (埃) |
-| | `B_hbond_acceptors` | 氢键受体数 | 个 (无量纲) |
-| | `B_hbond_donors` | 氢键供体数 | 个 (无量纲) |
-| 卟啉 MOF | `MOF_potential` | 氧化还原电位 | V vs. NHE |
-| | `M_CO_binding_energy` | 金属-CO 结合能 | eV |
-| 光敏剂 | `PS_absorption_wavelength` | 最大吸收波长 | nm |
-| | `PS_potential` | 激发态氧化还原电位 | V vs. NHE |
-| 溶剂 | `Solvent_dielectric` | 相对介电常数 | 无量纲 (ε_r) |
-| | `Solvent_hbond_acceptors` | 氢键受体数 | 个 (无量纲) |
-| | `Solvent_hbond_donors` | 氢键供体数 | 个 (无量纲) |
-| | `CO2_solubility` | CO₂ 溶解度 | mol/L |
-| 反应条件 | `H2O_concentration` | 水浓度 | vol% |
-| | `Sacrificial_agent_potential` | 牺牲剂氧化电位 | V vs. NHE |
-| | `Sacrificial_agent_concentration` | 牺牲剂浓度 | mol/L |
-
-**7 个可能产物列：**
-
-> 产量单位可统一采用 **µmol·g⁻¹·h⁻¹** (产率) 或 **FE%** (法拉第效率)，
-> 在同一数据集中保持一致即可。
-
-| 产物 | 列名 | 说明 | 推荐单位 |
-|------|------|------|----------|
-| CO | `Y_CO` | 一氧化碳 (**默认优化目标**) | µmol·g⁻¹·h⁻¹ 或 FE% |
-| HCOOH | `Y_HCOOH` | 甲酸 / 甲酸盐 | µmol·g⁻¹·h⁻¹ 或 FE% |
-| CH₄ | `Y_CH4` | 甲烷 | µmol·g⁻¹·h⁻¹ 或 FE% |
-| C₂H₄ | `Y_C2H4` | 乙烯 | µmol·g⁻¹·h⁻¹ 或 FE% |
-| CH₃OH | `Y_CH3OH` | 甲醇 | µmol·g⁻¹·h⁻¹ 或 FE% |
-| C₂H₅OH | `Y_C2H5OH` | 乙醇 | µmol·g⁻¹·h⁻¹ 或 FE% |
-| H₂ | `Y_H2` | 氢气 (HER 竞争副反应) | µmol·g⁻¹·h⁻¹ 或 FE% |
-
-> **注意：** 也可以直接写含碳产物总量 (用单列 `Y`表示)。
-> 若使用正式入口且数据仅包含 legacy 单目标列 `Y`，系统会在 `Y_CO` 缺失时自动切换到 `Y` 并给出日志提示。
 
 ### 3. 运行
 
@@ -195,57 +89,8 @@ python -m co2rr_bo --non-interactive
 
 ---
 
-## ⚙️ 运行的参数
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--data` | `data/data.csv` | 输入数据集路径 |
-| `--candidates` | `data/candidates.csv` | 离散候选向量 CSV 路径 |
-| `--target-product` | `CO` | 优化目标产物：`CO`, `HCOOH`, `CH4`, `C2H4`, `CH3OH`, `C2H5OH`, `H2` |
-| `--top-k` | `10` | 特征选择保留的 Top-K 特征数 |
-| `--beta` | `2.0` | UCB 探索参数 β（本实现使用 $\mu + \beta\sigma$，即直接乘以 $\sigma$） |
-| `--beta-schedule` | `fixed` | β 调度策略：`fixed`、`theory`（缩放理论 β_t）、`theory-strict`（纯理论 β_t） |
-| `--beta-delta` | `0.1` | 理论 β_t 调度的置信参数 δ（在 `theory/theory-strict` 下生效） |
-| `--acq-strategy` | `ucb` | 采集策略：`ucb` 或 `qnei`（噪声实验更推荐） |
-| `--qnei-mc-samples` | `128` | qNEI 的 QMC 采样数（越大越稳健，计算更慢） |
-| `--kernel-type` | `matern` | GP 核函数：`matern`（默认）或 `spectral_mixture`（适合复杂多峰响应面） |
-| `--h2-penalty-weight` | `0.0` | 若大于 0，优化目标改为 `Y_target - weight * Y_H2`，用于抑制 HER 竞争反应 |
-| `--iterations` | `10` | 贝叶斯优化迭代次数 |
-| `--non-interactive` | `False` | 非交互演示模式 (自动模拟实验结果) |
-| `--skip-feature-selection` | `False` | 跳过 RF 特征筛选，直接使用全部 19 维特征（论文最小闭环模式） |
-| `--strict-training-schema` | `False` | 严格训练模式：要求训练数据具备完整 19/19 描述符，否则报错 |
-| `--pre-fill-before-choice` | `False` | 选点前补全连续候选的非选中特征，支持按完整 19 维配方比较 |
-| `--kabo-mode` | `False` | 启用带有专家领域偏好的 Knowledge-Augmented Bayesian Optimization 模式 |
-| `--lambda-p` | `1.0` | 控制历史选择偏好对采集函数的影响比例 |
-| `--lambda-k` | `1.0` | 控制专家先验（JSON 指定知识空间）对采集函数的影响比例 |
-| `--expert-prior-file`| `None` | (仅 KABO 模式) 定义专家先验知识边界与高斯重心的 JSON 文件路径 |
-| `--seed` | `None` | 全局随机种子，统一控制 NumPy/Torch/Python 随机性以提高复现稳定性 |
-| `--output-dir` | `output` | 输出文件目录 |
-| `--device` | `auto` | 设备选择：`auto`, `cpu`, `cuda` |
-
-### 何时开启 pre-fill-before-choice
-
-建议开启 `--pre-fill-before-choice` 的场景：
-
-- 你希望在“选点前”就比较连续候选的完整 19 维实验配方，而不是先选点再补录。
-- 体系中非选中特征与选中特征存在明显耦合（例如溶剂/牺牲剂与关键电位共同决定可行性）。
-- 专家评审强调实验可执行性，需要先看完整 recipe 再做决策。
-- 目标是论文高保真复现，希望在选点前基于完整 19 维信息做一致性评审。
-
-建议保持默认关闭（`False`）的场景：
-
-- 你更关注快速迭代，希望减少每轮交互输入成本。
-- 大多数迭代都会优先选择离散候选，连续候选较少被执行。
-- 先选点后补录已足够满足当前实验流程。
-
----
-
-## 🔬贝叶斯优化如何实现
-
-> **[核心提示]** 本实现主要落地原论文（arXiv:2604.01328v3）的理论框架，同时也包含了一项工程增强（Engineering Enhancement）。为保证审阅与复现的清晰性，特此澄清两者边界：
-> - **论文主流程**：Phase 2（BoTorch 代理模型构建）和 Phase 3（采集函数 + 人机交互优化）严格遵循论文设定（对应 Algorithm 2 / 3）。建议高保真复现时，组合使用 `--skip-feature-selection --strict-training-schema --pre-fill-before-choice --seed 42`；若偏理论配置，可进一步启用 `--beta-schedule theory-strict`。
-> - **RF 工程增强流程（默认）**：Phase 1（特征选择）是针对全量 19 维特征在极小样本量下可能遭遇降维打击而附加的启发式工程包（基于 RandomForest）。此设计虽能加速模型收敛，但不属于原论文核心闭环体系。
-
+## 流程
 
 ### Phase 1: 特征权重评估与选择
 
@@ -384,9 +229,9 @@ qNEI 使用 Monte Carlo 方式估计 noisy expected improvement，在随机实�
 
 ---
 
-## 🐍 编程接口 (API)
+## 编程接口 (API)
 
-除命令行外，也可作为 Python 库直接调用：
+除命令行外，该项目也可作为 Python 库直接调用：
 
 ```python
 from co2rr_bo import CO2RROptimizer
@@ -416,48 +261,13 @@ optimizer.phase3_optimize(              # 优化循环
 )
 ```
 
-### 关键属性
-
-```python
-optimizer.selected_features      # Top-K 特征名列表
-optimizer.feature_importances    # 特征重要性 (pd.Series)
-optimizer.surrogate.model        # BoTorch SingleTaskGP 模型
-optimizer.surrogate.bounds_raw   # 原始尺度下的特征边界
-optimizer.df                     # 当前数据集 (pd.DataFrame)
-```
-
----
-
-## 📊 输出文件
+## 输出文件说明
 
 | 文件 | 说明 |
 |------|------|
 | `output/feature_importances.png` | 特征重要性柱状图 (含 Top-K 截断线) |
 | `output/data_updated.csv` | 包含所有新增实验数据的更新数据集 |
 | `output/run_metadata.json` | 运行元数据（参数、seed、β 调度配置、每轮 β_t、特征集合、时间戳等） |
-
----
-
-## 🧠 方法论基础
-
-本项目基于论文 **arXiv:2604.01328v3** 的以下核心方法：
-
-| 论文章节 | 对应实现 |
-|----------|---------|
-| **Part II: Surrogate Models** — GP 代理模型理论 | `surrogate.py`: `SurrogateModel` 类 |
-| **§Kernel Function** — Matérn 核与 ARD | `ScaleKernel(MaternKernel(ν=2.5, ard_num_dims=K))` |
-| **§Hyperparameter Adaptation** — 边际似然最大化 | `fit_gpytorch_mll(ExactMarginalLogLikelihood)` |
-| **Part III: Acquisition Functions** — UCB 理论 | `acquisition.py`: `UpperConfidenceBound` |
-| **Algorithm 2: GP-UCB** — 优化循环 | `optimizer.py`: `phase3_optimize()` |
-| **Algorithm 3: Human-in-the-Loop** — 专家交互 | `acquisition.py`: `print_recommendations()`, `prompt_user_candidate_choice()`, `prompt_user_manual_candidate()`, `prompt_user_input_multiproduct()` |
-| **§Feature Representation** — 特征工程 | `feature_selection.py`: Random Forest 重要性 |
-
-### 为什么？
-
-- **Matérn 2.5 (而非 RBF)**：不假设目标函数无限可微（实际化学体系通常不满足），是科学优化的推荐选择
-- **ARD 核**：CO₂RR 描述符跨越多种物理量（电位、波长、浓度等），各维度需要独立的长度尺度
-- **UCB 采集函数**：具有理论遗憾界保证 (Theorems 1 & 2)，$\beta$ 参数可调控探索-利用平衡
-- **Random Forest 特征选择**：在小样本下稳定评估非线性特征-目标关系，降维后提升 GP 拟合效率
 
 ---
 
@@ -470,7 +280,7 @@ optimizer.df                     # 当前数据集 (pd.DataFrame)
    - β ≈ 2.0：平衡（推荐默认值）
    - β > 3.0：偏向探索（exploration），倾向不确定性高的区域
 4. **离散候选集**：`candidates.csv` 应包含与 `data.csv` 相同的特征列（不含产量列）
-5. **设备兼容性**：macOS 上默认使用 CPU；NVIDIA GPU 可加速大数据集场景
+5. **设备兼容性**：cpu/cuda
 
 ---
 
