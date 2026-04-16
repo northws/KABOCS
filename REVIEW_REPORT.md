@@ -852,3 +852,121 @@ Where:
 - KABO 知识内化成熟度：**8.5/10**（↑ 从 7.5；新增 PE + VOI + Tie + Prior 校验）
 - 工程可用性：**9.2/10**（↑ 从 9.0）
 - 审计可追溯性：**9.3/10**（↑ 从 9.0；tie_count + prior_checks + pe_budget in metadata）
+
+## 二十二、对 §21 新改动的代码复审（2026-04-16）
+
+本节针对 §21“暂缓项全部落地”声明进行代码真值核对与命令复验。
+
+### 22.1 复审结论
+
+1. §21 的四项落地声明整体成立：Tie 审计、PE MVP、VOI 近似项、Prior 校验工具均在代码中可见并可运行。
+2. §21 给出的 4 条验证命令复跑通过，未出现 Traceback / NameError / NaN。
+3. 发现 2 个低优先级工程风险（参数防呆缺口），建议补齐。
+
+### 22.2 代码级核对结果
+
+1. P2-E Tie 审计链路存在：
+- `co2rr_bo/acquisition.py` 的 `prompt_user_candidate_choice()` 支持 `tie/t/equal -> -2`。
+- `co2rr_bo/optimizer.py` 在 `chosen_idx == -2` 时自动执行 Rank #1 且跳过偏好写入，并维护 `_tie_count`。
+
+2. P1-B PE MVP 存在：
+- `co2rr_bo/preference.py` 新增 `generate_pe_queries()`（基于不确定性的 pair 选择，冷启动随机退化）。
+- `co2rr_bo/optimizer.py` 每轮进入 BO 前执行 PE 子循环（interactive 且 `pe_budget > 0` 时）。
+
+3. P1-C 近似 VOI 存在：
+- `co2rr_bo/acquisition.py` 的 `KABOAcquisition` 支持 `lambda_v`，当 `lambda_v > 0` 时引入 posterior variance proxy 并参与 z-score 组合。
+- `co2rr_bo/optimizer.py` 的 KABO 封装已传递 `lambda_v`。
+
+4. P2-F 结构化先验工具存在：
+- 新增模板：`priors/templates/co2rr_prior_template.json`
+- 新增校验脚本：`scripts/validate_prior.py`
+
+### 22.3 运行复验结果
+
+复跑命令：
+
+```bash
+python run.py --kabo-mode --lambda-v 0.5 --non-interactive --iterations 3 --seed 42
+python run.py --kabo-mode --pe-budget 2 --non-interactive --iterations 2 --seed 42
+python run.py --non-interactive --iterations 2 --seed 42
+python scripts/validate_prior.py priors/templates/co2rr_prior_template.json
+```
+
+结果：
+
+1. 三条 BO 命令均成功结束。
+2. Prior 校验输出 `ALL CHECKS PASSED`，并生成 `output/prior_checks/co2rr_prior_template_check.json`。
+3. `output/run_metadata.json` 可见新增字段：`tie_count`、`pe_budget`、`lambda_v`，KABO 运行时同时记录 `lambda_p/lambda_k/expert_prior_file`。
+
+### 22.4 新增发现（低优先级）
+
+#### P2-1  `pe_budget` 缺少非负校验
+
+- 现状：`co2rr_bo/optimizer.py` 未限制 `pe_budget >= 0`。
+- 风险：误传负值时功能会被静默关闭（`>0` 判定不满足），不利于实验配置审计。
+- 建议：在 `__init__()` 中新增 `pe_budget` 的整数与非负校验。
+
+#### P2-2  `lambda_v` 缺少有限性/下界校验
+
+- 现状：`co2rr_bo/optimizer.py` 未校验 `lambda_v`。
+- 风险：`nan` 或极端负值会导致采集组合语义异常或不可解释。
+- 建议：新增 `np.isfinite(lambda_v)` 与下界策略（建议 `>= 0`，若允许负值需在文档明确）。
+
+### 22.5 结论
+
+第 21 节实现总体可信并可运行。当前剩余工作主要是参数防呆与配置语义收紧，属于低优先级工程完善项。
+
+## 二十三、§22.4 工程完善项修复（2026-04-16）
+
+### 23.1 已修复项
+
+#### P2-1 ✅  `pe_budget` 增加非负整数校验
+
+- 修改位置：`co2rr_bo/optimizer.py` — `__init__()` 参数验证区
+- 实现：`if not isinstance(self.pe_budget, int) or self.pe_budget < 0: raise ValueError(...)`
+- 验证：传入负值 `--pe-budget -1` 正确抛出 `ValueError`。
+
+#### P2-2 ✅  `lambda_v` 增加有限性与非负校验
+
+- 修改位置：`co2rr_bo/optimizer.py` — `__init__()` 参数验证区
+- 实现：`if not (np.isfinite(self.lambda_v) and self.lambda_v >= 0.0): raise ValueError(...)`
+- 验证：由于 argparse 自动转 float 无法传递非浮点字符串，传入负值 `--lambda-v -0.5` 正确抛出 `ValueError`。
+
+### 23.2 当前状态
+截至目前，最后一批“参数防呆”缺口已全部闭环，KABO 的四个增强项 (Tie、PE、VOI、Prior Checks) 在代码和配置级别都达到了可用且健壮的标准。
+
+## 二十四、对 §23 新改动的复核验收（2026-04-16）
+
+本节对 §23 声明的两项参数防呆修复进行代码真值核对与命令复验。
+
+### 24.1 复核结论
+
+1. `pe_budget` 非负整数校验已生效。
+2. `lambda_v` 有限且非负校验已生效。
+3. 本轮未发现新增阻断/中优先级问题。
+
+### 24.2 代码级证据
+
+1. `co2rr_bo/optimizer.py` 参数验证区已包含：
+  - `pe_budget` 非负整数校验
+  - `lambda_v` 有限性与非负校验
+
+### 24.3 运行复验
+
+执行：
+
+```bash
+python run.py --pe-budget -1 --non-interactive --iterations 1 --seed 42
+python run.py --kabo-mode --lambda-v -0.5 --non-interactive --iterations 1 --seed 42
+```
+
+结果：
+
+1. 第一条命令正确抛出：
+  `ValueError: pe_budget must be a non-negative integer (got -1).`
+2. 第二条命令正确抛出：
+  `ValueError: lambda_v must be a finite non-negative number (got -0.5).`
+
+### 24.4 当前状态
+
+`§22.4` 提出的最后两项低优先级风险已完成“实现 + 复核 + 运行验收”闭环。

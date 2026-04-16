@@ -254,6 +254,14 @@ class CO2RROptimizer:
                 f"diversity_weight must be a finite non-negative number "
                 f"(got {self.diversity_weight})."
             )
+        if not isinstance(self.pe_budget, int) or self.pe_budget < 0:
+            raise ValueError(
+                f"pe_budget must be a non-negative integer (got {self.pe_budget})."
+            )
+        if not (np.isfinite(self.lambda_v) and self.lambda_v >= 0.0):
+            raise ValueError(
+                f"lambda_v must be a finite non-negative number (got {self.lambda_v})."
+            )
 
         if self.seed is not None:
             set_global_seed(self.seed)
