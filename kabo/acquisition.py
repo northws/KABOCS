@@ -26,16 +26,9 @@ from botorch.models import SingleTaskGP
 from botorch.optim import optimize_acqf
 from botorch.sampling.normal import SobolQMCNormalSampler
 
-from co2rr_bo.constants import (
-    ALL_FEATURE_COLUMNS,
-    ALL_PRODUCT_COLUMNS,
-    DESIGN_SPACE_BOUNDS,
-    PRODUCT_COLUMNS,
-    PRODUCT_NAMES,
-)
-from co2rr_bo.utils import get_logger, unnormalize_x
-from co2rr_bo.preference import PreferenceModel
-from co2rr_bo.knowledge import ExpertPrior
+from kabo.utils import get_logger, unnormalize_x
+from kabo.preference import PreferenceModel
+from kabo.knowledge import ExpertPrior
 
 logger = get_logger(__name__)
 
@@ -258,13 +251,14 @@ def optimize_continuous(
 def load_discrete_candidates(
     candidates_path: Optional[Path],
     selected_features: list[str],
-    all_feature_columns: list[str] | None = None,
+    all_feature_columns: list[str],
+    design_bounds: dict[str, tuple[float, float]],
     strict_all_features: bool = True,
 ) -> Optional[pd.DataFrame]:
     """Load discrete candidate vectors from CSV and validate completeness.
 
-    When ``strict_all_features`` is True (default), **all 19 features**
-    in ``ALL_FEATURE_COLUMNS`` must be present and non-NaN --- not just
+    When ``strict_all_features`` is True (default), **every feature**
+    declared by the active Task must be present and non-NaN --- not just
     the selected subset.  This prevents "seemingly discrete" candidates
     from containing system-inferred fields, which would undermine
     reproducibility (REVIEW_REPORT §P0-1).
@@ -275,9 +269,10 @@ def load_discrete_candidates(
         Path to the candidates CSV file.
     selected_features : list[str]
         Currently selected feature names.
-    all_feature_columns : list[str] or None
-        Full list of 19 descriptor names.  Defaults to
-        ``ALL_FEATURE_COLUMNS`` from ``constants``.
+    all_feature_columns : list[str]
+        Full ordered descriptor list (supplied by the active Task).
+    design_bounds : dict[str, tuple[float, float]]
+        Design-space bounds per feature (supplied by the active Task).
     strict_all_features : bool
         If True, require *all* feature columns to be present and
         non-NaN.  If False, only ``selected_features`` are validated
@@ -303,9 +298,6 @@ def load_discrete_candidates(
             )
         return None
 
-    if all_feature_columns is None:
-        all_feature_columns = ALL_FEATURE_COLUMNS
-
     candidates_df = pd.read_csv(candidates_path)
 
     # --- P0-1: Determine which columns to validate ---
@@ -317,7 +309,10 @@ def load_discrete_candidates(
     missing = set(validate_cols) - set(available)
 
     if missing:
-        scope = "all 19 features" if strict_all_features else "selected features"
+        scope = (
+            f"all {len(all_feature_columns)} features"
+            if strict_all_features else "selected features"
+        )
         raise ValueError(
             f"Candidates CSV '{candidates_path.name}' is missing required "
             f"{scope}: {sorted(missing)}. "
@@ -330,7 +325,10 @@ def load_discrete_candidates(
     # --- P0-1 continued: Check for NaN values across validated scope ---
     nan_count = candidates_df[validate_cols].isna().sum().sum()
     if nan_count > 0:
-        scope = "all 19 feature" if strict_all_features else "selected feature"
+        scope = (
+            f"all {len(all_feature_columns)} feature"
+            if strict_all_features else "selected feature"
+        )
         raise ValueError(
             f"Candidates CSV contains {nan_count} NaN values in "
             f"{scope} columns. All candidate values must be complete."
@@ -339,8 +337,8 @@ def load_discrete_candidates(
     # --- Validate candidate values are within design bounds ---
     n_violations = 0
     for feat in validate_cols:
-        if feat in DESIGN_SPACE_BOUNDS:
-            lo, hi = DESIGN_SPACE_BOUNDS[feat]
+        if feat in design_bounds:
+            lo, hi = design_bounds[feat]
             col_vals = candidates_df[feat]
             below = (col_vals < lo).sum()
             above = (col_vals > hi).sum()
@@ -375,9 +373,9 @@ def evaluate_discrete_candidates(
     selected_features: list[str],
     bounds_raw: torch.Tensor,
     device: torch.device,
+    all_feature_columns: list[str],
+    design_bounds: dict[str, tuple[float, float]],
     top_n: int = 5,
-    all_feature_columns: list[str] | None = None,
-    design_bounds: dict[str, tuple[float, float]] | None = None,
     strict_full_bounds: bool = True,
 ) -> list[tuple[torch.Tensor, float, int]]:
     """Evaluate the acquisition function over a discrete candidate set.
@@ -400,16 +398,14 @@ def evaluate_discrete_candidates(
         Design-space bounds tensor, shape ``(2, K)``.
     device : torch.device
         Torch device.
+    all_feature_columns : list[str]
+        Full ordered descriptor list (supplied by the active Task).
+    design_bounds : dict[str, tuple[float, float]]
+        Design-space bounds per feature (supplied by the active Task).
     top_n : int, optional
         Number of top candidates to return (default 5).
-    all_feature_columns : list[str] or None
-        Full list of 19 descriptor names.  Defaults to
-        ``ALL_FEATURE_COLUMNS`` from ``constants``.
-    design_bounds : dict or None
-        Explicit design-space bounds dict.  Defaults to
-        ``DESIGN_SPACE_BOUNDS`` from ``constants``.
     strict_full_bounds : bool
-        If True, exclude candidates where *any* of the 19 features
+        If True, exclude candidates where *any* of the feature columns
         violates its design-space bound (not just selected features).
 
     Returns
@@ -418,11 +414,6 @@ def evaluate_discrete_candidates(
         List of ``(candidate_normalized, acquisition_value, original_row_idx)``
         tuples, sorted by acquisition value descending.
     """
-    if all_feature_columns is None:
-        all_feature_columns = ALL_FEATURE_COLUMNS
-    if design_bounds is None:
-        design_bounds = DESIGN_SPACE_BOUNDS
-
     # ---- P0-2: Full-feature boundary pre-filter ----------------------------
     if strict_full_bounds:
         full_bounds_mask = np.ones(len(candidates_df), dtype=bool)
@@ -497,70 +488,6 @@ def evaluate_discrete_candidates(
         # Map back to the original DataFrame row index
         orig_row_idx = int(valid_full_indices[int(local_valid[idx])])
         results.append((cand_tensor, float(acq_values[idx]), orig_row_idx))
-
-    return results
-
-
-def prompt_user_input_multiproduct(
-    target_column: str,
-) -> Optional[dict[str, float]]:
-    """Prompt the user for experimental results (all product yields).
-
-    Asks the user to input the yield (FE% or µmol/g·h) for each
-    CO2RR product. The optimization target is highlighted.
-
-    Parameters
-    ----------
-    target_column : str
-        The column name of the target product being optimized
-        (e.g. ``"Y_CO"``).
-
-    Returns
-    -------
-    dict[str, float] or None
-        Dictionary mapping product column names to yield values,
-        or ``None`` if the user wants to exit.
-    """
-    target_name = PRODUCT_NAMES.get(target_column, target_column)
-
-    print("\n  ┌─────────────────────────────────────────────────────┐")
-    print("  │  📋 ENTER EXPERIMENTAL RESULTS (all product yields) │")
-    print("  │     Enter '0' for undetected products               │")
-    print("  │     Enter 'exit' to stop optimization               │")
-    print("  └─────────────────────────────────────────────────────┘")
-
-    results: dict[str, float] = {}
-
-    for product_name, col_name in PRODUCT_COLUMNS.items():
-        is_target = (col_name == target_column)
-        marker = " ★ TARGET" if is_target else ""
-
-        while True:
-            try:
-                prompt = (
-                    f"    {product_name:8s} ({col_name}){marker}: "
-                )
-                user_input = input(prompt).strip()
-
-                if user_input.lower() in ("exit", "quit", "q"):
-                    return None
-
-                value = float(user_input)
-                results[col_name] = value
-                break
-
-            except ValueError:
-                print("      ⚠ Invalid input. Enter a number or 'exit'.")
-            except (EOFError, KeyboardInterrupt):
-                print("\n  Received interrupt. Exiting.")
-                return None
-
-    # Summary
-    print(f"\n  Recorded yields:")
-    for col_name, value in results.items():
-        name = PRODUCT_NAMES.get(col_name, col_name)
-        marker = " ★" if col_name == target_column else ""
-        print(f"    {name:8s} = {value:8.2f}{marker}")
 
     return results
 
@@ -805,47 +732,6 @@ def prompt_user_nonselected_features(
     return results, oob_confirmation_count, overridden_fields
 
 
-def simulate_multiproduct_yields(
-    target_column: str,
-    target_mean: float,
-    target_std: float,
-) -> dict[str, float]:
-    """Simulate multi-product yields for non-interactive demo mode.
-
-    Generates realistic synthetic yields where the target product
-    is dominant and other products have lower yields.
-
-    Parameters
-    ----------
-    target_column : str
-        Column name of the optimization target.
-    target_mean : float
-        Mean of the target product's yield.
-    target_std : float
-        Std of the target product's yield.
-
-    Returns
-    -------
-    dict[str, float]
-        Simulated yields for all products.
-    """
-    results: dict[str, float] = {}
-
-    for col_name in ALL_PRODUCT_COLUMNS:
-        if col_name == target_column:
-            # Target product: sample around training distribution
-            value = target_mean + np.random.normal(0, target_std * 0.3)
-            results[col_name] = round(max(0.0, value), 2)
-        elif col_name == "Y_H2":
-            # H₂ (HER side reaction): typically 5–20% range
-            results[col_name] = round(np.random.uniform(2.0, 15.0), 2)
-        else:
-            # Other CO2RR products: small amounts (0–10%)
-            results[col_name] = round(np.random.exponential(2.0), 2)
-
-    return results
-
-
 def print_recommendations(
     candidates_norm: list[torch.Tensor],
     acq_values: list[float],
@@ -857,6 +743,7 @@ def print_recommendations(
     bounds_raw: torch.Tensor,
     iteration: int,
     target_column: str,
+    product_names: dict[str, str],
     top_n: int = 3,
     continuous_nonselected_values: dict[str, float] | None = None,
     diversity_weight: float = 0.5,
@@ -894,6 +781,8 @@ def print_recommendations(
         Current iteration number.
     target_column : str
         The optimization target column name.
+    product_names : dict[str, str]
+        Mapping from product column name to display name (from Task).
     top_n : int, optional
         Number of recommendations to print (default 3).
     continuous_nonselected_values : dict[str, float] or None
@@ -906,7 +795,7 @@ def print_recommendations(
     list[int]
         Indices of the top-N candidates.
     """
-    target_name = PRODUCT_NAMES.get(target_column, target_column)
+    target_name = product_names.get(target_column, target_column)
 
     # ------------------------------------------------------------------
     # Diversity-aware Top-N selection (greedy submodular)
@@ -1003,6 +892,8 @@ def print_best_found(
     df: pd.DataFrame,
     selected_features: list[str],
     target_column: str,
+    all_product_columns: list[str],
+    product_names: dict[str, str],
 ) -> None:
     """Print the best observed experiment with all product yields.
 
@@ -1014,11 +905,15 @@ def print_best_found(
         Feature names to display.
     target_column : str
         The optimization target column name.
+    all_product_columns : list[str]
+        Ordered list of every product yield column (from Task).
+    product_names : dict[str, str]
+        Mapping from product column name to display name (from Task).
     """
     if df.empty or target_column not in df.columns:
         return
 
-    target_name = PRODUCT_NAMES.get(target_column, target_column)
+    target_name = product_names.get(target_column, target_column)
 
     best_idx = df[target_column].idxmax()
     best_target = df.loc[best_idx, target_column]
@@ -1030,7 +925,7 @@ def print_best_found(
     print(f"  {target_name} = {best_target:.4f}  ★")
 
     # Print all product yields if available
-    available_products = [c for c in ALL_PRODUCT_COLUMNS
+    available_products = [c for c in all_product_columns
                           if c in df.columns and c != target_column]
     if available_products:
         print("\n  All product yields:")
@@ -1040,7 +935,7 @@ def print_best_found(
         # Target first
         print(f"    {target_name + ' ★':10s} {best_target:10.4f}")
         for col in available_products:
-            name = PRODUCT_NAMES.get(col, col)
+            name = product_names.get(col, col)
             val = best_row.get(col, np.nan)
             if pd.notna(val):
                 print(f"    {name:10s} {val:10.4f}")

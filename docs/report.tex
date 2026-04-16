@@ -7,15 +7,41 @@
 \usepackage{geometry}
 \usepackage{caption}
 \usepackage{cite}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning, shapes.geometric, arrows.meta, fit, backgrounds, calc}
 \geometry{margin=1in}
 
 % 启用中文支持
 \usepackage{ctex}
 
+% 放宽 hbox 行末对齐以消除长标识符造成的 overfull
+\emergencystretch=2em
+\tolerance=2000
+\hbadness=5000
+
+% 长 typewriter 标识符的细粒度换行辅助宏
+\newcommand{\brk}{\discretionary{}{}{}}
+
+% listings 代码块配置
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue!70!black}\bfseries,
+    commentstyle=\color{gray!70!black}\itshape,
+    stringstyle=\color{orange!80!black},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    breaklines=true,
+    showstringspaces=false,
+    language=Python,
+}
+
 % 将 hyperref 放置在最后，并显式配置内部链接和颜色
 \usepackage[colorlinks=true, linkcolor=blue, anchorcolor=blue, citecolor=blue, urlcolor=blue, bookmarksnumbered=true]{hyperref}
 
-\title{\textbf{基于知识增强贝叶斯优化的光催化 \\ CO$_2$ 还原多产物预测与材料设计架构}}
+\title{\textbf{KABO：一种任务解耦的知识增强贝叶斯优化框架 \\ 及其在光催化 CO$_2$ 还原中的应用}}
 \author{Jiayu Wu}
 \date{\today}
 
@@ -23,100 +49,236 @@
 \maketitle
 
 \begin{abstract}
-光催化二氧化碳还原反应 (CO$_2$RR) 的材料探索受限于多物理化学属性相互交织所带来的高维搜索空间，叠加实验试错的巨额时间成本，传统经验式寻优极为低效。本文提出并实现了针对该问题量身定制的\textbf{知识增强贝叶斯优化}（Knowledge-Augmented Bayesian Optimization, KABO）计算框架。该框架在"人类在环"贝叶斯优化（HITL-BO）的基础上，进一步整合了偏好学习（Preference Learning）、专家先验编码（Expert Prior Encoding）、偏好探索子循环（Preference Exploration）以及近似信息价值驱动（Approximate VOI）等知识内化机制，实现了从被动接受人类反馈到主动学习与沉淀专家知识的范式转化。框架支持包含 CO、HCOOH、CH$_4$ 在内的多种 CO$_2$ 还原反应产物的收率最优化。针对多尺度物理问题带来的"维数灾难"，系统将随机森林降维前置，与带自动关联性确定（ARD）机制的 Mat\'{e}rn 高斯过程代理模型相融合，配合在线 z-score 标定的四项复合采集函数，在保持贝叶斯推断严格性的前提下有效平衡了开发-探索-知识-偏好四维目标。
+仿酶催化体系（CO$_2$RR、OER、NRR、ORR 等）的实验寻优长期面临高维设计空间、昂贵实验成本和领域知识难以结构化注入三重障碍。本文提出并实现了一种\textbf{任务解耦的知识增强贝叶斯优化框架}（Task-decoupled Knowledge-Augmented Bayesian Optimization, KABO），将纯数学优化能力封装为与体系无关的 \texttt{KABOEngine}，将体系相关逻辑抽象为统一的 \texttt{TaskBase} 接口。算法核心整合了偏好学习（Preference Learning）、专家先验编码（Expert Prior Encoding）、偏好探索子循环（Preference Exploration）与近似信息价值（Approximate VOI）四项知识内化机制，通过 z-score 标定的复合采集函数协同驱动候选选择。任务层以一个体系一个文件的形式组织（\texttt{kabo/task/*.py}），已内置光催化 CO$_2$ 还原任务（\texttt{CO2RRTask}，19 描述符 / 7 产物）与最小综合任务（\texttt{TestTask}，3 描述符 / 1 产物）。新增体系（OER 等）仅需新增一个约 50 行的 Task 类，Engine、Optimizer 与 CLI 零改动。本文以 CO$_2$RR 为主体案例，详述了架构分层、数学重构、KABO 四项机制、偏好探索子循环与人类在环闭环；并通过 TestTask 的端到端冒烟测试印证 Engine 的体系无关性。
 
-\textbf{关键词}：光催化；CO$_2$ 还原；贝叶斯优化；高斯过程；知识增强；偏好学习；人类在环设计
+\textbf{关键词}：贝叶斯优化；高斯过程；知识增强；偏好学习；任务解耦架构；光催化；CO$_2$ 还原
 \end{abstract}
 
 \vspace{2em}
 \tableofcontents
 \newpage
 
+
 \section{引言 (Introduction)}
 
-光催化二氧化碳还原成为应对气候变化、将 CO$_2$ 转化为高价值化学品（如 CO、甲酸、甲烷甚至多碳醇类）的革新性道路之一\cite{nature2025, jacs2024}。然而，在实际研究与工业运用中，催化剂性能（收率法拉第效率）呈高度复杂的非凸变化。这些特性受到多达数十个参数的共同控制（如能带间隙、描述符 A\_pI、反应位点等），在如此高维度和实验测量存在固有噪音的影响下，催化系统表现出显著的非线性行为。以往依赖高通量筛选 (HTS)\cite{nature2025} 与全穷举实验的方法容易受到"维数灾难"的桎梏。
+仿酶催化体系——以光催化 CO$_2$ 还原 (CO$_2$RR) 为代表——在通往化学品绿色合成的路径上具有战略价值\cite{nature2025, jacs2024}，但其材料探索在工程上面临三重结构性困难：
 
-应对昂贵评估函数的典型高效最优化范式当属贝叶斯优化 (Bayesian Optimization, BO) \cite{bo2012}。尽管标准 BO 理论对黑盒导数的评估是严密自洽的，但在真实的化学实验室设定里有明显鸿沟：一方面量纲差异下多元映射不稳定\cite{turbo2019}；另一方面实验专家的领域直觉难以被代理模型结构性地"内化"。因此，本报告在原始 HITL-BO 框架基础上，进一步发展出知识增强贝叶斯优化 (KABO) 体系。该体系将理论 GP-UCB \cite{gpucb2026} 演变为四阶段融合系统：降维筛选 (Phase 1) $\rightarrow$ 高斯特征代理重建 (Phase 2) $\rightarrow$ 偏好探索与知识采集 (Phase 2.5) $\rightarrow$ 知识增强采集-交互闭环 (Phase 3)，并通过偏好学习\cite{astudillo2019}、专家先验编码\cite{li2020prior}及近似信息价值\cite{wu2016kg}三条路径实现知识的持久内化与循环利用。
+\begin{enumerate}
+    \item \textbf{高维非凸设计空间}：催化剂性能受数十个描述符共同控制（能带间隙、A\_pI、位点距离、溶剂偶极……），配方响应面高度非线性，全穷举与高通量筛选 (HTS)\cite{nature2025} 受制于"维数灾难"。
+    \item \textbf{昂贵实验评估函数}：单次光催化收率测量通常需要数小时到数天，实验预算难以支撑样本数 $N \gg$ 维度 $d$ 的经典统计假设。
+    \item \textbf{领域知识的结构化注入缺失}：资深化学家的经验——"最优电位约 $-0.8$ V"、"甲酸产物的选择性与亲水溶剂强相关"——长期停留在口头约定与手工试错，难以融入数学模型结构。
+\end{enumerate}
+
+应对昂贵评估的经典范式是贝叶斯优化 (Bayesian Optimization, BO)\cite{bo2012}，其在黑盒函数导数不可得的条件下提供了理论严密的主动采样策略\cite{botorch2019, turbo2019}。然而标准 BO 与真实实验室之间仍存在两类鸿沟：其一，量纲悬殊导致核函数的欧氏度量坍塌\cite{turbo2019}；其二，专家直觉无法被代理模型结构性地"内化"。本报告在原始"人类在环"贝叶斯优化 (HITL-BO) 框架基础上，构建了 \textbf{KABO 知识增强贝叶斯优化}体系，并通过一层任务抽象使其天然支持多类催化体系。
+
+KABO 将优化流程组织为四阶段：降维筛选 (Phase 1) $\rightarrow$ 高斯代理模型重建 (Phase 2) $\rightarrow$ 偏好探索与知识采集 (Phase 2.5) $\rightarrow$ 知识增强采集-交互闭环 (Phase 3)，并通过偏好学习\cite{astudillo2019}、专家先验编码\cite{li2020prior}及近似信息价值\cite{wu2016kg}三条路径实现知识的持久内化与循环利用。Task 抽象层则负责所有体系相关语义（特征、产物、边界、交互文案），使同一份算法内核可以驱动任意催化体系。
 
 
+\section{任务解耦的系统架构 (Task-Decoupled System Architecture)}
 
-\section{系统框架与描述符特征拆分 (System Architecture \& Feature Descriptor Splitting)}
+\subsection{分层职责}
 
-原始输入数据集 ($X \in \mathbb{R}^{N \times 19}$) 映射到 19 项独立物理化学描述符 (Descriptors)，并覆盖了 CO$_2$ 还原体系的主要特征和结构指标。若强行使用 19 维特征展开代理模型拟合，受制于局部低信噪比与可获取数据点数量，预测面可能会落入过度平滑或局部震荡两个极端。因此，系统实现了分离式的提取和重建机制，并使用"前置填补 (Pre-fill-before-choice)"逻辑予以修复。
+KABO 采用三层架构（图 \ref{fig:arch}）将纯数学能力与体系语义彻底解耦：
+
+\begin{itemize}
+    \item \textbf{算法层} \texttt{kabo.engine.KABOEngine}：聚合 \texttt{SurrogateModel} (GP 代理)、\texttt{PreferenceModel} (PairwiseGP 偏好学习)、\texttt{ExpertPrior} (专家先验打分)。接口仅接受数值矩阵、边界张量与特征列表，\textbf{不包含任何体系关键词}。
+    \item \textbf{领域层} \texttt{kabo.task.TaskBase}：抽象合同定义特征集合、设计域边界、产物列、训练目标构造、交互与模拟逻辑。每个体系以一个独立 Python 文件实现（\texttt{kabo/task/co2rr.py}、\texttt{kabo/task/test\_task.py} 等），通过 \texttt{@register\_task} 装饰器自动注册到全局任务表 \texttt{TASK\_REGISTRY}。
+    \item \textbf{编排层} \texttt{kabo.optimizer.KABOOptimizer}：负责三阶段流程调度、离散/连续候选合并、Top-N 菜单呈现与审计字段写入。编排器持有一个 \texttt{task} 对象，所有体系相关读操作均经由 \texttt{self.task.*} 委派。
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\footnotesize
+\begin{tikzpicture}[
+    font=\footnotesize,
+    node distance=0.9cm and 0.8cm,
+    every node/.style={align=center},
+    layerlabel/.style={font=\footnotesize\bfseries\itshape, text=gray!60!black},
+    box/.style={
+        draw=black!70, thick, rounded corners=3pt,
+        fill=white, inner sep=6pt, minimum height=1cm,
+    },
+    cli/.style   ={box, fill=blue!8,   text width=9cm},
+    orch/.style  ={box, fill=green!8,  text width=9cm},
+    engine/.style={box, fill=orange!8, text width=6.4cm},
+    task/.style  ={box, fill=purple!8, text width=6.4cm},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick, black!70},
+  ]
+
+  \node[cli] (cli) {%
+    \textbf{CLI / run.py}\quad\texttt{(kabo/cli.py)}\\[1pt]
+    解析 \texttt{-{}-task} / \texttt{-{}-data} / \texttt{-{}-iterations}\\
+    从 \texttt{TASK\_REGISTRY} 构造 Task
+  };
+
+  \node[orch, below=of cli] (orch) {%
+    \textbf{KABOOptimizer}\quad\texttt{(kabo/optimizer.py)}\\[1pt]
+    Phase 1 特征选择 (RF)\ \textbar{}\ Phase 2 GP 拟合\ \textbar{}\ Phase 3 采集 + 人机交互循环
+  };
+
+  \node[engine, below=1.2cm of orch.south, xshift=-3.4cm, anchor=north] (eng) {%
+    \textbf{KABOEngine}\quad\texttt{(kabo/engine.py)}\\[1pt]
+    SurrogateModel \textbullet\ PreferenceModel \textbullet\ ExpertPrior\\
+    UCB / qNEI / KABO\\[1pt]
+    \textcolor{red!70!black}{\small$\triangle$ 无体系关键词}
+  };
+
+  \node[task, below=1.2cm of orch.south, xshift=3.4cm, anchor=north] (task) {%
+    \textbf{TaskBase (子类)}\quad\texttt{(kabo/task/*.py)}\\[1pt]
+    特征 \& 边界 \textbullet\ 产物列 \& 目标\\
+    交互 \& 模拟 \textbullet\ 先验 schema
+  };
+
+  \draw[arrow] (cli.south) -- (orch.north);
+  \draw[arrow] (orch.south) -- ($(eng.north)+(0,0)$);
+  \draw[arrow] (orch.south) -- ($(task.north)+(0,0)$);
+
+  \node[layerlabel, right=0.15cm of cli.east]  {装配层};
+  \node[layerlabel, right=0.15cm of orch.east] {编排层};
+  \node[layerlabel] at ($(eng.south)+(0,-0.3)$)  {算法层};
+  \node[layerlabel] at ($(task.south)+(0,-0.3)$) {领域层};
+\end{tikzpicture}
+\caption{KABO 三层架构：装配、编排、算法、领域各司其职。}
+\label{fig:arch}
+\end{figure}
+
+\subsection{TaskBase 接口契约}
+
+\texttt{TaskBase} 作为抽象基类定义了以下最小契约：
+
+\begin{itemize}
+    \item \texttt{task\_name()} $\rightarrow$ 体系短标识（\texttt{"CO2RR"}、\texttt{"OER"}）
+    \item \texttt{feature\_columns()} $\rightarrow$ 全量特征列名（有序）
+    \item \texttt{design\_space\_bounds()} $\rightarrow$ 每个特征的物理边界
+    \item \texttt{target\_columns()} $\rightarrow$ 产物短名 $\rightarrow$ DataFrame 列名映射
+    \item \texttt{default\_target()} $\rightarrow$ 默认优化目标
+    \item \texttt{build\_training\_target(df, target\_column, **kwargs)} $\rightarrow$ 代理模型训练向量构造（支持复合目标，如 CO$_2$RR 的 $Y_{\text{target}} - w \cdot Y_{H_2}$）
+    \item \texttt{prompt\_observation(target\_column)} $\rightarrow$ 交互模式下收集实验观测
+    \item \texttt{simulate\_observation(target\_column, $\mu$, $\sigma$)} $\rightarrow$ 演示模式下模拟观测
+\end{itemize}
+
+可选 Hook（\texttt{validate\_candidates}、\texttt{parse\_expert\_prior}）提供默认实现。契约设计遵循"已知抽象、未知具体"原则：Engine 只向 Task 提出问题（"你的特征是什么？目标是什么？"），Task 的具体答案不渗漏回算法层。
+
+\subsection{注册机制与零改动扩展}
+
+新增体系的工作流具体化为三步：
+
+\begin{lstlisting}[caption={新增 OERTask 的最小模板},label={lst:oer}]
+# kabo/task/oer.py
+from kabo.task.base import TaskBase, register_task
+
+@register_task
+class OERTask(TaskBase):
+    def task_name(self): return "OER"
+    def feature_columns(self): return ["overpotential", "pH", ...]
+    def design_space_bounds(self):
+        return {"overpotential": (0.2, 1.2), "pH": (0.0, 14.0), ...}
+    def target_columns(self): return {"O2": "Y_O2"}
+    def default_target(self): return "O2"
+    def build_training_target(self, df, target_column, **kwargs):
+        return df[target_column].values.astype(float)
+    def prompt_observation(self, target_column): ...
+    def simulate_observation(self, target_column, y_mean, y_std): ...
+\end{lstlisting}
+
+随后在 \texttt{kabo/task/\_\_init\_\_.py} 追加一行 \texttt{from kabo.task.oer import OERTask} 以触发注册。用户立即可用 \texttt{python run.py -{}-task oer}，\textbf{Engine、Optimizer、CLI 核心代码零改动}。这一约束由算法层模块的静态代码检查保证：对 \texttt{kabo/engine.\brk py}、\texttt{kabo/acquisition.\brk py}、\texttt{kabo/feature\_\brk selection.py} 等算法层文件执行 \texttt{grep} 扫描，不应出现任何体系特定常量。
+
+
+\section{描述符处理与边界感知归一化}
 
 \subsection{非线性特征拆分及基尼重要度评判}
-有别于线性主成分分析 (PCA) 带来的物理解释性丧失，我们依靠随机森林树群对所有维度特征作相对重要度（Feature Importances）估算，并截断以保留 Top-$K$ 描述符：
+
+原始数据集在 Task 声明的 $d$ 维描述符空间中展开（CO$_2$RR 为 19 维）。在可获取数据点数量有限（$N \sim 20$）、局部信噪比低的条件下强行使用全维 GP 易导致过度平滑或局部震荡。系统前置随机森林非线性降维，使用基尼重要度保留 Top-$K$ 维：
 
 \begin{equation}
     \text{Imp}(x_j) = \frac{1}{N_{trees}} \sum_{t=1}^{N_{trees}} \sum_{s \in \text{nodes}(t), v(s) = x_j} p(s) \cdot \Delta I(s)
 \end{equation}
 
-$\Delta I(s)$ 为基于特征 $x_j$ 拆解引起的杂质 (通常为方差) 下降，$p(s)$ 为节点权重。此阶段确保最不相关或最受噪声干扰的维度在 GP-BO 前即被丢弃，生成 $X_{selected} \in \mathbb{R}^{N \times K}$，并保证了随后的局部采样有效性\cite{turbo2019}。
+$\Delta I(s)$ 为基于特征 $x_j$ 拆解引起的杂质（方差）下降，$p(s)$ 为节点权重。随机森林在 $N < 10$ 时自动降低 \texttt{n\_estimators} 与深度以避免过拟合，生成 $X_{\text{selected}} \in \mathbb{R}^{N \times K}$。相较于 PCA 带来的物理解释性丧失，基尼度量保留了特征的可追溯性\cite{turbo2019}。
 
 \subsection{缺失特征重构与"Pre-fill-before-choice"机制}
-剥离了弱关联维度后，算法在获取最新优化点 $x^*_{cont} \in \mathbb{R}^K$ 计算最优收率。然而由于真实合成需全套 19 维配方基准（Strict Feature Schema），若静默抛弃则将直接导致复审阶段化学可行性错位。为此架构引入 \textbf{基于历史映射的前突预填充 (Pre-fill-before-choice)}，对那些处于 $X_{non-selected}$ 的特征，采用数据集同源近似插值或默认基准将其恢复投影至原始 19 维设计域，在呈现给领域专家前保证描述符状态闭环，既发挥了降维优势又实现了信息一致保真。
 
+得到最优连续点 $x^*_{\text{cont}} \in \mathbb{R}^K$ 后，实验配方需恢复到 Task 声明的全部 $d$ 维以满足合成可行性。架构引入 \textbf{Pre-fill-before-choice} 机制：未被选中的 $d-K$ 维特征按专家预填值或设计域中点补齐，使候选呈现给专家时已为完整配方，避免描述符不完整导致的审核错位。
 
+\subsection{边界感知归一化 (Bounds-Aware Normalization)}
 
-\section{高斯过程代理模型的数学重构 (Surrogate Model Mathematical Reformulation)}
+传统机器学习常用 $\text{MinMax}(X_{\text{train}})$ 归一化，但当模型探索超出训练样本极值范围时会产生灾难性失真。系统改用 Task 提供的理论设计域边界 $(l^{(k)}, u^{(k)})$ 做归一化：
 
-\subsection{具有独立长度尺度的 ARD Mat\'{e}rn 核}
-利用观测对象 $\mathcal{D}_N = \{X_{selected}^{(i)}, y^{(i)}\}_{i=1}^N$ 构建代理模型 $f(X) \sim \mathcal{GP}(\mu, k(X, X'))$。
-
-化学体系内诸如功函数(eV)或者比表面积($\text{m}^2/\text{g}$)的标度差异悬殊，采用通用的欧里几得度量会导致量纲坍塌。报告选择采用带 \textbf{自动关联性决定 (Automatic Relevance Determination, ARD)} 的 Mat\'{e}rn 核，其平滑度设置为 $\nu = 2.5$ 兼顾不可导的高频震荡：
 \begin{equation}
-    k_{\text{Mat\'{e}rn } 2.5}(x, x') = \sigma_f^2 \left( 1 + \sqrt{5} d_{\text{ARD}} + \frac{5}{3} d_{\text{ARD}}^2 \right) \exp\left( -\sqrt{5} d_{\text{ARD}} \right)
+    x_{\text{norm}, k} = \max \left( 0, \;\min \left( 1, \; \frac{x_k - l^{(k)}}{u^{(k)} - l^{(k)}} \right) \right)
 \end{equation}
-引入加权对角矩阵，对经过特征筛选存留的 $K$ 维变量实现独立长度尺度缩放 $l_k$：
+
+此举确保高斯代理能够在训练样本未覆盖的区域无缝外推，完全杜绝由训练集极值作为归一化分母引入的伪外推偏误。
+
+
+\section{高斯过程代理模型}
+
+\subsection{ARD Mat\'{e}rn 核}
+
+利用观测 $\mathcal{D}_N = \{X_{\text{selected}}^{(i)}, y^{(i)}\}_{i=1}^N$ 构建代理模型 $f(x) \sim \mathcal{GP}(\mu, k(x, x'))$。化学体系内诸如功函数 (eV) 与比表面积 ($\text{m}^2/\text{g}$) 的标度差异悬殊，通用欧氏度量会坍塌。选择带\textbf{自动关联性决定 (ARD)} 的 Mat\'{e}rn 核，$\nu = 2.5$ 兼顾不可导的高频震荡：
+
+\begin{equation}
+    k_{\text{Mat\'{e}rn } 2.5}(x, x') = \sigma_f^2 \left( 1 + \sqrt{5} d_{\text{ARD}} + \tfrac{5}{3} d_{\text{ARD}}^2 \right) \exp\left( -\sqrt{5} d_{\text{ARD}} \right)
+\end{equation}
+
+加权对角矩阵对 $K$ 维变量实现独立长度尺度缩放 $l_k$：
+
 \begin{equation}
     d_{\text{ARD}}(x, x') = \sqrt{ \sum_{k=1}^K \frac{(x_k - x'_k)^2}{l_k^2} }
 \end{equation}
-此处 $l_k$ 的自适应有效补偿了特征值之间的刚性错位。对于更为复杂的形貌突变响应曲面，引入复合频谱混合核 (Spectral Mixture Kernels)\cite{catbox2025} 的设计作为可选接口已被预留。
 
-\subsection{物理显式的边界感知归一化 (Bounds-Aware Normalization)}
-数据映射至 $[0,1]^K$ 是 BO 后端的常态化要求。但传统机器学习常采用 $\text{MinMax}(X_{train})$，这会在模型外推超出历史样本极大极小值时产生灾难性失真：
-系统改用\textbf{理论设计域外推下界归一化}，设外部专家给予已知特征的实验理论边界配置字典 \texttt{DESIGN\_SPACE\_BOUNDS} 为 $(l^{(c)}, u^{(c)})$：
-\begin{equation}
-    x_{norm, k} = \max \left( 0, \;\min \left( 1, \; \frac{x_k - l^{(k)}}{u^{(k)} - l^{(k)}} \right) \right)
-\end{equation}
-这强制确立了高斯边缘回归能够无缝探针"未开发区域"，完全杜绝由训练记录极限作为归一化分母引起的伪外推偏误。
+$l_k$ 的自适应对特征量纲刚性错位实现有效补偿。对于更为复杂的形貌突变响应曲面，复合谱混合核 (Spectral Mixture Kernels)\cite{catbox2025} 作为可选接口通过 \texttt{--kernel-type spectral\_mixture} 启用。
 
 \subsection{超参数的边际对数似然估计}
-为确定核平稳方差 $\sigma_f^2$，观测白噪声方差 $\sigma_n^2$ 以及尺度向量 $\mathbf{l}$，对高斯模型作边际分布积分，最大化 Exact Marginal Log-Likelihood (MLL)：
+
+核方差 $\sigma_f^2$、观测白噪声方差 $\sigma_n^2$ 与尺度向量 $\mathbf{l}$ 通过最大化 Exact Marginal Log-Likelihood 获得：
+
 \begin{equation}
-    \log p(\mathbf{y} | X, \bm{\theta}) = -\frac{1}{2} \mathbf{y}^\top (K(X, X; \bm{\theta}) + \sigma_n^2 I)^{-1} \mathbf{y} - \frac{1}{2} \log|K(X, X; \bm{\theta}) + \sigma_n^2 I| - \frac{N}{2} \log 2\pi
+    \log p(\mathbf{y} | X, \bm{\theta}) = -\tfrac{1}{2} \mathbf{y}^\top (K_\theta + \sigma_n^2 I)^{-1} \mathbf{y} - \tfrac{1}{2} \log|K_\theta + \sigma_n^2 I| - \tfrac{N}{2} \log 2\pi
 \end{equation}
-求解过程使用 L-BFGS-B 或基于 Torch 的梯度下降展开。
+
+求解过程使用 L-BFGS-B 或基于 Torch 的梯度下降（\texttt{fit\_gpytorch\_mll}）。
 
 
+\section{基础采集策略}
 
-\section{基础采集策略 (Base Acquisition Strategies)}
+高分辨收率测定常带有光源扰动或杂质吸附引入的环境噪声。系统融合了置信区间探索与带噪期望改进两类算法基准，统一封装在 \texttt{KABOEngine.\brk build\_acquisition(beta)} 接口下，通过 \texttt{-{}-acq-strategy} 切换。
 
-高分辨收率测定常带有由于光源扰动或杂质吸附带来的固有环境噪声。我们结合问题情况，融合了置信区间探索与带噪期望改进两类算法基准。
+\subsection{UCB 与 $\beta_t$ 调度}
 
-\subsection{基于 UCB 的时频调度}
-依据 Ding et al.\cite{gpucb2026} 之 GP-UCB 理论准则，最大化置信上边界即可在探索不确定区域(Exploration)与收割当前高收率点(Exploitation)产生黄金折中：
+依 Ding et al.\cite{gpucb2026} 的 GP-UCB 理论准则，最大化置信上边界在探索与收割之间给出黄金折中。本实现采用 BoTorch 常见参数化：
+
 \begin{equation}
-    \alpha_{\text{UCB}}(x) = \mu_{t-1}(x) + \beta_t^{1/2} \sigma_{t-1}(x)
+    \alpha_{\text{UCB}}(x) = \mu_{t-1}(x) + \beta_t \, \sigma_{t-1}(x)
 \end{equation}
-本框架设计支持按迭代轮数动态控制退火机制（\texttt{theory} 模式，随着采样深化提升 $\beta_t$ 防止困于局部极值），或是保留用户指定恒定探索参数。此外还提供 \texttt{theory-strict} 模式以纯理论公式计算 $\beta_t$（不再乘以用户 \texttt{beta} 缩放因子），用于高保真论文复现。
 
-\subsection{噪声干扰下的 Expected Improvement (qNEI)}
-为了使得收率优化针对环境干扰有更强鲁棒性\cite{cbo2017}，BoTorch 引擎底层的带噪期望提升
-函数 (\texttt{qNoisyExpectedImprovement}) 运用蒙特卡洛法整合观测概率提升：
+三种 $\beta_t$ 调度模式：
+
+\begin{itemize}
+    \item \texttt{fixed}：常数 $\beta$，默认 2.0
+    \item \texttt{theory}：$\beta_t = \beta \cdot 2 \log \left( t^{d/2 + 2} \pi^2 / (3 \delta) \right)$，允许用户 \texttt{beta} 缩放
+    \item \texttt{theory-strict}：纯理论 $\beta_t$（不做缩放），用于高保真论文复现
+\end{itemize}
+
+\subsection{噪声下的 qNEI}
+
+BoTorch 引擎底层的带噪期望提升（\texttt{qNoisyExpectedImprovement}）用 Monte Carlo 法整合观测概率提升\cite{cbo2017}：
+
 \begin{equation}
-    \alpha_{\text{qNEI}}(x) = \mathbb{E}_{y|x \sim \mathcal{N}}\left[ \max(y - y_{best}^*,\, 0) \right]
+    \alpha_{\text{qNEI}}(x) = \mathbb{E}_{y|x \sim \mathcal{N}}\left[ \max(y - y_{\text{best}}^*,\, 0) \right]
 \end{equation}
-使用 128 采样数目的近似 SobolQMCNormalSampler 对高阶期望作 Quasi-Monte Carlo 无偏估计\cite{botorch2019}。
+
+使用 128 采样数（可调）的 \texttt{SobolQMCNormalSampler} 做 Quasi-Monte Carlo 无偏估计\cite{botorch2019}。qNEI 对高噪声场景比 UCB 更稳健。
 
 
+\section{知识增强贝叶斯优化 (KABO)}
 
-\section{知识增强贝叶斯优化 (Knowledge-Augmented Bayesian Optimization)}
-
-标准 HITL-BO 中，专家反馈仅体现为单次候选选择，其蕴含的偏好模式和领域知识未被结构性沉淀。为弥合这一鸿沟，我们构建了知识增强贝叶斯优化 (KABO) 框架，通过三条知识通道注入结构化先验：
+标准 HITL-BO 中，专家反馈仅体现为单次候选选择，其蕴含的偏好模式和领域知识未被结构性沉淀。KABO 通过三条知识通道注入结构化先验。
 
 \subsection{KABO 复合采集函数}
-KABO 的核心是一个四项加权组合采集函数。为防止各项因量纲与数值范围差异导致的信号压制问题，在组合前对每一项做在线 z-score 标准化：
+
+KABO 核心是一个四项加权组合采集函数。为防止各项因量纲与数值范围差异导致的信号压制，在组合前对每一项做\textbf{在线 z-score 标准化}：
+
 \begin{equation}
     \alpha_{\text{KABO}}(x) = z\bigl(\alpha_{\text{base}}(x)\bigr)
     + \lambda_p \cdot z\bigl(\text{Pref}_{\text{MC}}(x)\bigr)
@@ -124,163 +286,248 @@ KABO 的核心是一个四项加权组合采集函数。为防止各项因量纲
     + \lambda_v \cdot z\bigl(\text{VOI}(x)\bigr)
     \label{eq:kabo}
 \end{equation}
-其中 $z(\cdot)$ 为当前评估批次的 z-score 归一化算子：
+
+z-score 定义为：
+
 \begin{equation}
-    z(t) = \frac{t - \bar{t}}{\hat{\sigma}_t + \epsilon}, \quad \hat{\sigma}_t = \sqrt{\frac{1}{n} \sum_{i=1}^n (t_i - \bar{t})^2}, \quad \epsilon = 10^{-8}
+    z(t) = \frac{t - \bar{t}}{\hat{\sigma}_t + \epsilon}, \quad \hat{\sigma}_t = \sqrt{\tfrac{1}{n} \sum_{i=1}^n (t_i - \bar{t})^2}, \quad \epsilon = 10^{-8}
 \end{equation}
-当批次为单元素或标准差为零时，$z(\cdot)$ 返回全零向量以避免数值退化。各项含义如下：
+
+批次为单元素或标准差为零时 $z(\cdot)$ 返回全零以避免数值退化。各项含义：
 
 \begin{itemize}
-    \item $\alpha_{\text{base}}$：基础采集（UCB 或 qNEI），提供代理模型驱动的探索-开发平衡。
-    \item $\text{Pref}_{\text{MC}}$：偏好后验的蒙特卡洛积分得分（见 \ref{sec:pref}）。
-    \item $\text{Prior}$：基于 JSON 配置的专家先验打分（见 \ref{sec:prior}）。
-    \item $\text{VOI}$：代理模型后验方差作为信息价值近似（见 \ref{sec:voi}）。
+    \item $\alpha_{\text{base}}$：基础采集（UCB 或 qNEI），代理驱动的探索-开发平衡
+    \item $\text{Pref}_{\text{MC}}$：偏好后验的 MC 积分得分（\S\ref{sec:pref}）
+    \item $\text{Prior}$：基于 JSON 配置的专家先验打分（\S\ref{sec:prior}）
+    \item $\text{VOI}$：代理模型后验方差作为信息价值近似（\S\ref{sec:voi}）
 \end{itemize}
-权重 $\lambda_p, \lambda_k, \lambda_v \geq 0$ 均可通过 CLI 参数配置，默认 $\lambda_p = \lambda_k = 1.0$，$\lambda_v = 0.0$（关闭）。
+
+权重 $\lambda_p, \lambda_k, \lambda_v \geq 0$ 均可 CLI 配置，默认 $\lambda_p = \lambda_k = 1.0$，$\lambda_v = 0.0$（关闭）。
 
 \subsection{偏好学习与蒙特卡洛效用积分}
 \label{sec:pref}
 
-专家在每轮迭代中选择执行某一候选而非其余，这构成了一组典型的成对比较数据 (Pairwise Comparison)。我们使用 BoTorch 的 PairwiseGP\cite{botorch2019} 以 Bradley-Terry 模型建模专家效用函数 $u(x)$：
+专家每轮选择执行某一候选而非其余，构成一组典型的成对比较数据。系统使用 BoTorch 的 \texttt{PairwiseGP}\cite{botorch2019} 以 Bradley-Terry 模型建模专家效用函数 $u(x)$：
 
 \begin{equation}
-    P(\text{$x_i$ 优于 $x_j$}) = \Phi\bigl(u(x_i) - u(x_j)\bigr), \quad u \sim \mathcal{GP}(\mathbf{0}, k_{\text{pref}})
+    P(x_i \succ x_j) = \Phi\bigl(u(x_i) - u(x_j)\bigr), \quad u \sim \mathcal{GP}(\mathbf{0}, k_{\text{pref}})
 \end{equation}
 
-其中 $\Phi$ 为标准正态CDF，$k_{\text{pref}}$ 为偏好空间上的 ARD Mat\'{e}rn 核。
+$\Phi$ 为标准正态 CDF，$k_{\text{pref}}$ 为偏好空间上的 ARD Mat\'{e}rn 核。
 
-\textbf{关键改进}：依照 Astudillo \& Frazier (2019)\cite{astudillo2019} 的 EI-UU（Expected Improvement under Utility Uncertainty）框架，我们不使用偏好后验均值 $\mathbb{E}[u(x)|\mathcal{D}]$ 作为点估计，而是对效用后验做蒙特卡洛积分：
+\textbf{关键改进（EI-UU）}：依 Astudillo \& Frazier\cite{astudillo2019} 的 Expected Improvement under Utility Uncertainty 框架，不使用偏好后验均值作为点估计，而是对效用后验做 MC 积分：
+
 \begin{equation}
     \text{Pref}_{\text{MC}}(x) = \frac{1}{S} \sum_{s=1}^{S} u^{(s)}(x), \quad u^{(s)} \sim p(u | \mathcal{D}_{\text{pref}})
 \end{equation}
-默认 $S = 16$ 个后验采样，通过重参数化技巧 (\texttt{rsample}) 实现。该方法保留了效用不确定性信息，避免过早锁定可能偏差的偏好估计。
 
-\textbf{偏好数据去重}：为防止候选重复导致比较图冗余膨胀，在写入偏好数据前对新点做 $L_2$ 近邻查重（阈值 $\epsilon = 10^{-4}$），匹配到已有节点时复用其索引。
+默认 $S = 16$ 个后验采样，通过重参数化 (\texttt{rsample}) 实现。该方法保留效用不确定性信息，避免过早锁定偏差估计。
 
-\textbf{三态偏好支持}：交互界面支持 winner / loser / \textbf{tie} 三种回答。Tie 声明不写入偏好模型（BoTorch PairwiseGP 不原生支持等价标签），仅作审计记录，出现次数计入 \texttt{tie\_count} 并写入实验元数据，当 tie 占比超过阈值时可触发模型扩展评估。
+\textbf{偏好数据去重}：为防止候选重复导致比较图冗余膨胀，新点写入前做 $L_2$ 近邻查重（阈值 $\epsilon = 10^{-4}$），匹配到已有节点时复用索引。
+
+\textbf{三态偏好支持}：交互界面支持 winner / loser / \textbf{tie} 三种回答。Tie 不写入偏好模型（\texttt{PairwiseGP} 不原生支持等价标签），仅作审计记录，\texttt{tie\_count} 写入实验元数据。
 
 \subsection{专家先验编码}
 \label{sec:prior}
 
-领域专家对某些描述符特征具有先验判断（例如``最优电位在 $-1.0$ 至 $-0.6$ V 范围''）。系统通过 JSON 配置文件将这些知识编码为参数化分布（支持高斯和均匀两种形式），并在采集评估时产生先验打分：
+领域专家对某些描述符具有先验判断（例如"最优电位约 $-1.0$ 至 $-0.6$ V"）。系统通过 JSON 配置将这些知识编码为参数化分布（高斯或均匀），采集评估时产生先验打分：
 
 \begin{equation}
     \text{Prior}(x) = \sum_{k \in \mathcal{K}} S_k(x_k)
 \end{equation}
 
-其中 $\mathcal{K}$ 为有先验配置的特征子集。对于高斯先验，$S_k(x_k) = -\frac{(x_k - \mu_k)^2}{2\sigma_k^2}$，即对数密度核；对于均匀先验，在区间外施加常数惩罚。
+$\mathcal{K}$ 为配置了先验的特征子集。高斯先验 $S_k(x_k) = -\frac{(x_k - \mu_k)^2}{2\sigma_k^2}$（对数密度核），均匀先验在区间外施加常数惩罚。
 
-\textbf{先验校验流程 (Prior Predictive Check)}：新增的 \texttt{scripts/validate\_prior.py} 工具对 JSON 配置执行：(1) 参数合法性校验（$\sigma > 0$，$\min < \max$）；(2) Monte Carlo 采样检查设计空间覆盖率；(3) 输出结构化 JSON 报告。未通过校验的先验不应进入正式实验。每条先验记录包含 \texttt{confidence}（置信等级）和 \texttt{evidence}（证据来源）审计字段，确保可追溯性。
+\textbf{先验校验流程 (Prior Predictive Check)}：\texttt{scripts/validate\_prior.py --task <name>} 对 JSON 配置执行：(1) 参数合法性校验（$\sigma > 0$、$\min < \max$）；(2) Monte Carlo 采样检查设计空间覆盖率；(3) 输出结构化 JSON 报告。未通过校验的先验不应进入正式实验。每条记录含 \texttt{confidence}、\texttt{evidence} 审计字段保证可追溯。工具通过 \texttt{--task} 参数从 \texttt{TASK\_REGISTRY} 取得对应设计域边界，天然支持多体系。
 
 \subsection{近似信息价值 (Approximate VOI)}
 \label{sec:voi}
 
-知识梯度 (Knowledge Gradient, KG)\cite{wu2016kg} 的核心思想是偏好"信息价值高"的候选——评估后能最大程度缩减对最优解的不确定性。真正的 KG 需要 one-step lookahead 嵌套优化，计算开销极大。作为轻量近似，我们使用代理模型的后验方差作为信息价值代理：
+知识梯度 (Knowledge Gradient, KG)\cite{wu2016kg} 的核心是偏好"信息价值高"的候选。真正的 KG 需要 one-step lookahead 嵌套优化，计算开销极大。作为轻量近似，使用代理模型后验方差作为信息价值代理：
 
 \begin{equation}
     \text{VOI}(x) = \text{Var}[f(x) | \mathcal{D}_t] = \sigma_{t}^2(x)
 \end{equation}
 
-高方差区域的评估将最大化后验信息增益，这是 KG 的零阶近似。该项通过 $\lambda_v$ 控制权重，默认关闭（$\lambda_v = 0$）；当开启时，采集函数会更积极地探索模型不确定区域。
+高方差区域的评估最大化后验信息增益，这是 KG 的零阶近似。通过 $\lambda_v$ 控制权重，默认关闭。
 
 
+\section{偏好探索子循环 (Preference Exploration)}
 
-\section{偏好探索子循环 (Preference Exploration Sub-loop)}
+标准 HITL-BO 中偏好信息仅从实验后的候选选择中被动获取。受 Lin et al.\cite{lin2022pebo} PEBO 框架启发，系统引入\textbf{偏好探索 (Preference Exploration, PE)} 子循环：在每轮实物实验之前，以零实验代价主动查询专家偏好。
 
-标准 HITL-BO 中偏好信息仅从实验后的候选选择中被动获取。受 Lin et al. (2022)\cite{lin2022pebo} 的 PEBO 框架启发，我们引入\textbf{偏好探索 (Preference Exploration, PE)} 子循环：在每轮实物实验之前，以零实验代价主动查询专家偏好。
-
-\subsection{查询对生成策略}
-采用\textbf{不确定性策略}：从离散候选池中选择偏好模型最不确定、且预测偏好差异最小的候选对——即信息量最大的 pair。对每对 $(x_i, x_j)$ 计算信息得分：
+采用\textbf{不确定性策略}：从离散候选池中选择偏好模型最不确定、且预测偏好差异最小的 pair——信息量最大。对每对 $(x_i, x_j)$ 计算：
 
 \begin{equation}
-    \text{Info}(x_i, x_j) = \text{Var}[u(x_i)] + \text{Var}[u(x_j)] - |{\mathbb{E}[u(x_i)] - \mathbb{E}[u(x_j)]}|
+    \text{Info}(x_i, x_j) = \text{Var}[u(x_i)] + \text{Var}[u(x_j)] - \bigl|\mathbb{E}[u(x_i)] - \mathbb{E}[u(x_j)]\bigr|
 \end{equation}
 
-得分最高的 $B$ 对（$B$ = \texttt{pe\_budget}，默认 0 表示关闭）依次呈现给专家，每对支持 ``A 优''、``B 优''或``Tie''三种回答。非 tie 回答直接写入偏好模型，PE 结束后触发偏好 GP 重拟合，再进入正式的采集优化。PE 在冷启动时（无偏好模型）退化为随机对选择。
+得分最高的 $B$ 对（$B = $ \texttt{pe\_budget}，默认 0 关闭）依次呈现给专家，每对支持 "A 优 / B 优 / Tie" 三种回答。非 tie 直接写入偏好模型，PE 结束后触发偏好 GP 重拟合，再进入正式采集优化。PE 在冷启动时（无偏好模型）退化为随机对选择。
 
 
+\section{多样性感知推荐菜单}
 
-\section{多样性感知推荐菜单 (Diversity-Aware Recommendation Menu)}
-
-受 Astudillo \& Frazier (2019)\cite{astudillo2019} ``向决策者呈现菜单而非单点''的理念驱动，Top-N 推荐采用贪心子模选择进行多样性重排：
+受 Astudillo \& Frazier\cite{astudillo2019} "向决策者呈现菜单而非单点"理念驱动，Top-N 推荐采用贪心子模选择进行多样性重排：
 
 \begin{enumerate}
-    \item 第 1 位：取纯最高采集值候选。
-    \item 后续位：取使 $\hat{\alpha}(x_i) + w_d \cdot \min_{j \in \mathcal{S}} \|x_i - x_j\|_2$ 最大者，其中 $\mathcal{S}$ 为已选集，$w_d$ 为多样性权重（\texttt{--diversity-weight}，默认 0.5）。
+    \item 第 1 位：取纯最高采集值候选
+    \item 后续位：取使 $\hat{\alpha}(x_i) + w_d \cdot \min_{j \in \mathcal{S}} \|x_i - x_j\|_2$ 最大者，其中 $\mathcal{S}$ 为已选集，$w_d$ 为多样性权重（\texttt{--diversity-weight}，默认 0.5）
 \end{enumerate}
 
-这避免了同质化推荐，使得实验探索更充分覆盖设计空间。$w_d = 0$ 退化为纯分数排序，$w_d$ 增大则强化候选间的空间分散。
+这避免了同质化推荐，$w_d = 0$ 退化为纯分数排序，$w_d$ 增大则强化候选间的空间分散。
 
 
+\section{人类在环机制与 KABO 执行流}
 
-\section{"人类在环"机制及伪代码实现 (Human-in-the-Loop \& KABO Implementation)}
+连续边界寻优得到的连续理想配方点 $x^*_{\text{cont}}$ 与读取外部历史离散库得到的候选最佳点 $X^*_{\text{disc}}$ 之间，模型未必保证它们对应的物化配置绝对可以在实验室合规组装。此时人工干预（Manual Override）与偏好探索作为控制流汇聚核心介入。
 
-在连续边界寻优得到的连续理想配方点 $x^*_{cont}$ 与读取外部历史离散库得到的候选最佳点 $X^*_{disc}$ 之间，模型未必保证它们对应的物化配置绝对可以在实验室合规组装。\textbf{此时人工干预(Manual Override)与偏好探索作为控制流汇聚核心介入}。
+整体流程分为\textbf{主循环骨架}（算法 \ref{alg:kabo-outer}）与\textbf{单轮内层迭代}（算法 \ref{alg:kabo-inner}）两部分，后者为前者 FOR 循环体中被调用的子过程 \textsc{InnerIteration}$(t, \mathcal{T}, \mathcal{D}_{t-1}, D_{\text{cand}}, \mathcal{M}_{\text{pref}})$。
 
 \begin{algorithm}[H]
-\caption{CO$_2$RR Knowledge-Augmented Bayesian Optimization 执行流}
-\label{alg:kabo-bo}
+\caption{KABO 主循环骨架（适用于任意 \texttt{TaskBase} 子类）}
+\label{alg:kabo-outer}
 \begin{algorithmic}[1]
-\REQUIRE 特征边界 $\mathcal{B}$，总迭代数 $T$，初始观测组 $\mathcal{D}_0$，候选数据库 $D_{cand}$
-\REQUIRE KABO 参数：$\lambda_p, \lambda_k, \lambda_v$，PE 预算 $B$，先验配置 $\mathcal{P}$
-\STATE \textbf{Initialize:} 校验 19 维特征。用户选定产物收率 (如 \texttt{Y\_CO}) 及采集策略 (UCB/qNEI)。
-\STATE \textbf{Phase 1 (Feature Selection)} \textit{// 启发式信息压缩}
-\STATE 使用 RF 回归器从 $\mathcal{D}_0$ 对目标组分配权重，排序筛选最显著的 $K$ 项组作 $X_{selected}$。
-\STATE 加载专家先验 $\mathcal{P}$ 并执行 Prior Predictive Check 校验。
-\FOR{$t = 1 \textbf{ to } T$}
-    \STATE \textit{// \textbf{Step 0: Preference Exploration（偏好探索子循环）}}
-    \IF{KABO 模式启用 \textbf{and} $B > 0$}
-        \STATE 从 $D_{cand}$ 生成 $B$ 个最具信息量的候选对 $\{(x_a^{(b)}, x_b^{(b)})\}_{b=1}^B$
-        \FOR{$b = 1$ \textbf{to} $B$}
-            \STATE 向专家展示 $(x_a^{(b)}, x_b^{(b)})$，收集回答 $\in \{A, B, \text{Tie}\}$
-            \IF{非 Tie}
-                \STATE 将 winner/loser 写入偏好模型 $\mathcal{M}_{\text{pref}}$
-            \ENDIF
-        \ENDFOR
-        \STATE 重拟合 $\mathcal{M}_{\text{pref}}$（PairwiseGP Laplace MLL）
-    \ENDIF
-    \STATE \textit{// \textbf{Step 1: 构建 KABO 采集函数}}
-    \STATE $\mathcal{M}_{GP} \leftarrow \text{Fit}(\mathcal{D}_{t-1}, k_{\text{ARD}})$
-    \STATE $\alpha_{\text{base}} \leftarrow$ UCB$(\beta_t)$ 或 qNEI（视策略选择而定）
-    \STATE $\alpha_{\text{KABO}} \leftarrow z(\alpha_{\text{base}}) + \lambda_p z(\text{Pref}_{\text{MC}}) + \lambda_k z(\text{Prior}) + \lambda_v z(\text{VOI})$
-    \STATE \textit{// \textbf{Step 2: 候选优化与多样性推荐}}
-    \STATE $x_{cont} \leftarrow \arg\max_{x \in [0,1]^K} \alpha_{\text{KABO}}(x)$
-    \STATE 评估离散候选 $\hat{Y}_{disc} \leftarrow \text{Evaluate}(D_{cand}, \alpha_{\text{KABO}})$
-    \STATE 按多样性重排推举 Top-N 菜单（贪心子模选取）
-    \STATE \textit{// \textbf{Step 3: Human Review}}
-    \IF{专家选择 \texttt{tie}}
-        \STATE $x_{final} \leftarrow$ Rank \#1（自动选取），跳过偏好记录
-    \ELSIF{专家选择 \texttt{manual override}}
-        \STATE $x_{final} \leftarrow x_{manual}$，将 $(x_{manual} \succ \text{all Top-N})$ 写入 $\mathcal{M}_{\text{pref}}$
-    \ELSE
-        \STATE $x_{final} \leftarrow x_{chosen}$，将 $(x_{chosen} \succ \text{unchosen})$ 写入 $\mathcal{M}_{\text{pref}}$
-    \ENDIF
-    \STATE \textbf{Laboratory Execution}: 制备并运行实验，获取多产物收率 $\mathbf{Y}_{all}$。
-    \STATE \textbf{Update}: $\mathcal{D}_t \leftarrow \mathcal{D}_{t-1} \cup (x_{final}, \mathbf{Y}_{all})$
+\REQUIRE Task 对象 $\mathcal{T}$，总迭代数 $T$，初始观测组 $\mathcal{D}_0$，候选数据库 $D_{\text{cand}}$
+\REQUIRE KABO 参数 $\lambda_p, \lambda_k, \lambda_v$；PE 预算 $B$；先验配置 $\mathcal{P}$
+\STATE \textbf{Initialize}: $d \leftarrow |\mathcal{T}.\text{feature\_columns}()|$；默认目标取 $\mathcal{T}.\text{default\_target}()$，用户可覆写采集策略
+\STATE \textbf{Phase 1}: 用 RF 回归器从 $\mathcal{D}_0$ 对目标拟合，排序筛选最显著的 $K$ 项作 $X_{\text{selected}}$
+\STATE 加载专家先验 $\mathcal{P}$ 并执行 Prior Predictive Check 校验
+\STATE 初始化偏好模型 $\mathcal{M}_{\text{pref}} \leftarrow \varnothing$
+\FOR{$t = 1$ \textbf{to} $T$}
+    \STATE $(x_{\text{final}}, \mathbf{Y}_{\text{all}}, \mathcal{M}_{\text{pref}}) \leftarrow \textsc{InnerIteration}(t, \mathcal{T}, \mathcal{D}_{t-1}, D_{\text{cand}}, \mathcal{M}_{\text{pref}})$
+    \STATE $\mathcal{D}_t \leftarrow \mathcal{D}_{t-1} \cup (x_{\text{final}}, \mathbf{Y}_{\text{all}})$
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}
 
+\begin{algorithm}[H]
+\caption{\textsc{InnerIteration}：单轮 KABO 迭代}
+\label{alg:kabo-inner}
+\begin{algorithmic}[1]
+\REQUIRE 迭代轮数 $t$，Task $\mathcal{T}$，历史数据 $\mathcal{D}_{t-1}$，候选库 $D_{\text{cand}}$，偏好模型 $\mathcal{M}_{\text{pref}}$
+\STATE \textit{// \textbf{Step 0: Preference Exploration（可选）}}
+\IF{KABO 模式启用 \textbf{and} $B > 0$}
+    \STATE 从 $D_{\text{cand}}$ 选出 $B$ 个最具信息量的候选对
+    \FOR{$b = 1$ \textbf{to} $B$}
+        \STATE 向专家展示 pair，收集回答 $\in \{A, B, \text{Tie}\}$
+        \IF{非 Tie}
+            \STATE 将 winner/loser 写入 $\mathcal{M}_{\text{pref}}$
+        \ENDIF
+    \ENDFOR
+    \STATE 重拟合 $\mathcal{M}_{\text{pref}}$（PairwiseGP Laplace MLL）
+\ENDIF
+\STATE \textit{// \textbf{Step 1: 构建 KABO 采集函数}}
+\STATE $\mathcal{M}_{GP} \leftarrow \text{Fit}(\mathcal{D}_{t-1}, k_{\text{ARD}})$ \textit{// 由 Engine.fit\_surrogate 完成}
+\STATE $\alpha_{\text{base}} \leftarrow$ UCB$(\beta_t)$ 或 qNEI
+\STATE $\alpha_{\text{KABO}} \leftarrow z(\alpha_{\text{base}}) + \lambda_p z(\text{Pref}_{\text{MC}}) + \lambda_k z(\text{Prior}) + \lambda_v z(\text{VOI})$
+\STATE \textit{// \textbf{Step 2: 候选优化与多样性推荐}}
+\STATE $x_{\text{cont}} \leftarrow \arg\max_{x \in [0,1]^K} \alpha_{\text{KABO}}(x)$
+\STATE 评估离散候选 $\hat{Y}_{\text{disc}} \leftarrow \text{Evaluate}(D_{\text{cand}}, \alpha_{\text{KABO}})$
+\STATE 按多样性重排推举 Top-N 菜单（贪心子模）
+\STATE Pre-fill-before-choice：未被选中的 $d-K$ 维用专家值或中点补齐
+\STATE \textit{// \textbf{Step 3: Human Review}}
+\IF{专家选择 \texttt{tie}}
+    \STATE $x_{\text{final}} \leftarrow$ Rank \#1；跳过偏好记录
+\ELSIF{专家选择 \texttt{manual override}}
+    \STATE $x_{\text{final}} \leftarrow x_{\text{manual}}$；$(x_{\text{manual}} \succ \text{all Top-N})$ 写入 $\mathcal{M}_{\text{pref}}$
+\ELSE
+    \STATE $x_{\text{final}} \leftarrow x_{\text{chosen}}$；写入偏好对
+\ENDIF
+\STATE \textit{// \textbf{Step 4: Laboratory Execution}}
+\STATE $\mathbf{Y}_{\text{all}} \leftarrow \mathcal{T}.\text{prompt\_observation}(\cdot)$ \textit{// 或 simulate\_observation}
+\STATE \textbf{return} $(x_{\text{final}}, \mathbf{Y}_{\text{all}}, \mathcal{M}_{\text{pref}})$
+\end{algorithmic}
+\end{algorithm}
+
+值得注意的是两个伪代码中的所有步骤\textbf{均不涉及体系特定术语}：无论 $\mathcal{T}$ 是 \texttt{CO2RRTask}、\texttt{TestTask} 还是未来的 \texttt{OERTask}、\texttt{NRRTask}，控制流完全一致，体系差异仅在 $\mathcal{T}$ 的方法体内表达。
 
 
-\section{实验可追溯性与参数审计 (Traceability \& Parameter Auditing)}
+\section{案例研究：光催化 CO$_2$ 还原 (\texttt{CO2RRTask})}
 
-为保证实验结果的完全可复现，系统在每次运行结束后将所有超参数与配置写入结构化元数据文件 (\texttt{run\_metadata.json})，包括但不限于：
+\subsection{\texorpdfstring{19 描述符 $\times$ 7 产物方案}{19 描述符 x 7 产物方案}}
+
+\texttt{CO2RRTask} 在 \texttt{kabo/task/co2rr.py} 中实现，约 150 行。其特征维度按物化分组：
 
 \begin{itemize}
-    \item 基础参数：\texttt{seed}、\texttt{beta\_schedule}、\texttt{beta\_trace}、\texttt{acq\_strategy}
-    \item KABO 参数：\texttt{kabo\_mode}、\texttt{lambda\_p}、\texttt{lambda\_k}、\texttt{lambda\_v}
-    \item 交互参数：\texttt{diversity\_weight}、\texttt{pe\_budget}、\texttt{tie\_count}
-    \item 先验参数：\texttt{expert\_prior\_file}（含版本追溯）
-    \item 特征选择：\texttt{selected\_features}（实际使用的 $K$ 个描述符）
+    \item \textbf{氨基酸 A}（4 维）：A\_pI、A\_distance、A\_hbond\_acceptors、A\_hbond\_donors
+    \item \textbf{氨基酸 B}（4 维）：B\_pI、B\_distance、B\_hbond\_acceptors、B\_hbond\_donors
+    \item \textbf{卟啉 MOF}（2 维）：MOF\_potential、M\_CO\_binding\_energy
+    \item \textbf{光敏剂}（2 维）：PS\_absorption\_wavelength、PS\_potential
+    \item \textbf{溶剂}（4 维）：Solvent\_dielectric、Solvent\_hbond\_acceptors / donors、CO$_2$\_solubility
+    \item \textbf{反应条件}（3 维）：H$_2$O\_\brk concentration、Sacrificial\_\brk agent\_\brk potential、Sacrificial\_\brk agent\_\brk concentration
+\end{itemize}
+
+产物列包含 CO、HCOOH、CH$_4$、C$_2$H$_4$、CH$_3$OH、C$_2$H$_5$OH、H$_2$，其中 H$_2$ 被识别为竞争性 HER 副反应。
+
+\subsection{HER 选择性复合目标}
+
+\texttt{CO2RRTask.build\_training\_target} 支持 H$_2$ 惩罚项：当 \texttt{h2\_penalty\_weight} $> 0$ 时，构造 $y_{\text{composite}} = Y_{\text{target}} - w \cdot Y_{H_2}$ 作为代理训练目标，引导优化器偏离 HER 主导区。该机制是 CO$_2$RR 专有，OER 等其他体系无需暴露——验证了 Task 层封装体系特殊逻辑的合理性。
+
+\subsection{产物模拟分布（Demo 模式）}
+
+\texttt{CO2RRTask.simulate\_observation} 根据 CO$_2$RR 产物特性设定：目标产物以 GP 训练均值为中心、$0.3\sigma$ 为幅度采样；H$_2$ 在 $[2, 15]$ 均匀分布（HER 基线范围）；其他产物服从指数分布（scale = 2.0）模拟痕量副产物。该分布是 CO$_2$RR 领域的经验先验，\textbf{不被 Engine 所感知}。
+
+
+\section{体系无关性验证：\texttt{TestTask}}
+
+为独立验证 KABO 架构的任务解耦性，系统内置最小综合任务 \texttt{TestTask}（位于 \texttt{kabo/task/\brk test\_task.py}，约 60 行）：
+
+\begin{itemize}
+    \item 特征维：3（\texttt{x1}、\texttt{x2}、\texttt{x3}），单位边界 $[0, 1]^3$
+    \item 产物列：1（\texttt{y}）
+    \item 训练目标：直接取 \texttt{y}，无复合项
+    \item 模拟分布：以 GP 均值为中心、$0.5\sigma$ 采样单目标
+\end{itemize}
+
+合成数据使用形如 $y = 10 - 5 \sum_k (x_k - \mu_k^*)^2 + \epsilon$ 的平滑单峰函数（$\mu^* = (0.3, 0.7, 0.5)$）。通过命令
+
+\begin{verbatim}
+python -m kabo --task test --data data/test_data.csv --candidates none \
+    --skip-feature-selection --non-interactive --iterations 2 --seed 42
+\end{verbatim}
+
+可验证：(1) 相同 \texttt{KABOEngine} 实例在 3 维空间上正确拟合；(2) Phase 3 迭代推荐收敛至真实极值附近（GP 学到的 ARD 长度尺度约 $0.28 / 0.39 / 1.54$，正确反映 $x_3$ 对目标响应的相对弱相关）；(3) 全程无体系硬编码泄漏。
+
+
+\section{可追溯性与参数审计}
+
+为保证实验结果完全可复现，系统在每次运行结束将所有超参数与配置写入结构化元数据文件 \texttt{run\_metadata.json}：
+
+\begin{itemize}
+    \item \textbf{基础参数}：\texttt{seed}、\texttt{beta\_schedule}、\texttt{beta\_trace}、\texttt{acq\_strategy}
+    \item \textbf{KABO 参数}：\texttt{kabo\_mode}、\texttt{lambda\_p}、\texttt{lambda\_k}、\texttt{lambda\_v}
+    \item \textbf{交互参数}：\texttt{diversity\_weight}、\texttt{pe\_budget}、\texttt{tie\_count}
+    \item \textbf{先验参数}：\texttt{expert\_prior\_file}（含版本追溯）
+    \item \textbf{任务参数}：\texttt{task}（记录 \texttt{task\_name()}）、\texttt{selected\_features}（实际使用的 $K$ 个描述符）
 \end{itemize}
 
 所有参数均在优化器初始化阶段执行严格防呆校验（有限性、非负性、类型检查），异常值在运行前即被拦截。
 
 
+\section{讨论与展望}
+
+\subsection{任务解耦的工程价值}
+
+将 CO$_2$RR 专用代码重构为任务解耦架构的核心收益体现在三方面：
+
+\begin{enumerate}
+    \item \textbf{可扩展性}：新增体系的增量代码量 $\sim 50$ 行，零算法改动；多组实验室可并行各自体系而不互相干扰。
+    \item \textbf{可验证性}：\texttt{TestTask} 作为合成基线使 Engine 数学逻辑可以在合成数据上独立单元测试，CO$_2$RR 回归测试可以冻结基线比对。
+    \item \textbf{可维护性}：体系常量、交互文案、模拟分布隔离在各自 Task 文件内，修改某个体系不会波及其他体系的测试基线。
+\end{enumerate}
+
+\subsection{潜在扩展方向}
+
+\begin{itemize}
+    \item \textbf{多目标 Pareto 前沿}：目前 Task 返回标量训练目标，未来可扩展 \texttt{build\_training\_targets()} 返回向量以支持 multi-objective qEHVI\cite{botorch2019}
+    \item \textbf{异构特征类型}：当前 GP 仅处理连续特征，离散类别特征（如"溶剂种类"）可通过 Wang et al. CatBOX 框架\cite{catbox2025} 的谱混合核扩展
+    \item \textbf{更深的先验注入}：Mikkola et al.\cite{mikkola2021prior} 的先验启发方法可与 JSON 先验编码融合，支持领域专家以自然语言描述先验
+\end{itemize}
+
+
 \section{结语}
 
-本报告构建了从特征解耦裁剪、带 ARD 核物理感知映射的高斯代理，到知识增强贝叶斯优化闭环的完整系统。相较于初始的 HITL-BO 框架，KABO 在四个方面实现了质的提升：(1) 通过 PairwiseGP 偏好学习与 MC 积分将专家交互选择转化为持久化的效用模型；(2) 通过 JSON 参数化先验编码与 Prior Predictive Check 使领域知识的注入可审计、可校验；(3) 通过偏好探索子循环以零实验代价主动增强偏好模型质量；(4) 通过近似 VOI 项引导探索高信息价值区域。四项复合采集函数经在线 z-score 标定后协同工作，在 CO$_2$RR 等不确定大搜索面下兼顾了开发、探索、偏好与知识价值四重目标，使得实验加速寻优与专家知识沉淀得以兼备。该架构将在多成分催化体系和高通量实验室合成间成为有力的驱动支点。
+本报告构建了从特征解耦裁剪、物理感知映射的高斯代理，到知识增强贝叶斯优化闭环的完整系统，并通过任务解耦架构使同一套算法内核支持任意催化体系。相较于原始 HITL-BO 框架，KABO 在四个方面实现了质的提升：(1) 通过 PairwiseGP 偏好学习与 MC 积分将专家交互选择转化为持久化的效用模型；(2) 通过 JSON 参数化先验编码与 Prior Predictive Check 使领域知识的注入可审计、可校验；(3) 通过偏好探索子循环以零实验代价主动增强偏好模型质量；(4) 通过近似 VOI 项引导探索高信息价值区域。四项复合采集函数经在线 z-score 标定后协同工作，在 CO$_2$RR 等不确定大搜索面下兼顾开发、探索、偏好与知识价值四重目标。任务解耦层使这套机制得以从 CO$_2$RR 顺利推广至 OER、NRR、ORR 等同类仿酶催化体系，成为多成分催化实验与自动化合成间的可迁移驱动支点。
 
 \newpage
 \begin{thebibliography}{99}

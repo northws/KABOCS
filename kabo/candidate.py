@@ -1,10 +1,12 @@
 """
-Unified candidate data structure for CO2RR Bayesian Optimization.
+Unified candidate data structure for the KABO Bayesian Optimization
+pipeline.
 
 Provides a single ``CandidateRecord`` dataclass that holds the complete
-state of every candidate recommendation — raw values for all 19
-features, normalised values for selected features, provenance metadata,
-and audit fields required for high-fidelity paper reproduction.
+state of every candidate recommendation — raw values for *all* features
+defined by the active ``Task`` (e.g. the 19 CO2RR descriptors), normalised
+values for the GP-selected subset, provenance metadata, and audit fields
+required for high-fidelity paper reproduction.
 
 This directly addresses REVIEW_REPORT §P1-2:
   - Unified candidate object with ``raw_values``, ``normalized_values``,
@@ -25,7 +27,8 @@ class CandidateRecord:
     Attributes
     ----------
     raw_values : dict[str, float]
-        Raw (un-normalised) values for all 19 features.  For discrete
+        Raw (un-normalised) values for every feature declared by the
+        active ``Task`` (e.g. 19 descriptors for CO2RR).  For discrete
         candidates this comes from the original CSV row; for continuous
         candidates it combines GP-optimised selected features with
         expert-supplied non-selected features.
@@ -34,8 +37,8 @@ class CandidateRecord:
     source : str
         Provenance label — ``"continuous"`` or ``"discrete_<N>"``.
     is_valid_full_feature : bool
-        Whether *every* one of the 19 features passes boundary validation
-        (not just the selected subset).
+        Whether *every* feature declared by the active ``Task`` passes
+        boundary validation (not just the selected subset).
     acq_value : float
         UCB acquisition function value.
     orig_row_idx : int

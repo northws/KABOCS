@@ -27,7 +27,7 @@ from botorch.models import SingleTaskGP
 from gpytorch.kernels import MaternKernel, ScaleKernel, SpectralMixtureKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
-from co2rr_bo.utils import (
+from kabo.utils import (
     get_logger,
     normalize_x,
     standardize_y,

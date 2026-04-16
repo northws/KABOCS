@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from co2rr_bo.utils import unnormalize_x
+from kabo.utils import unnormalize_x
 
 logger = logging.getLogger(__name__)
 

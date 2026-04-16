@@ -1,14 +1,13 @@
 """
-CO2RROptimizer — Main Pipeline Orchestrator.
+KABOOptimizer — Main Pipeline Orchestrator.
 
 Coordinates the three-phase Bayesian Optimization workflow:
     Phase 1: Feature selection (Random Forest) — **optional**
     Phase 2: GP surrogate fitting (BoTorch SingleTaskGP + ARD Matérn)
     Phase 3: UCB acquisition + human-in-the-loop optimization
 
-Supports multi-product CO2RR yield optimization — the user selects
-which product to optimize (CO, HCOOH, CH₄, C₂H₄, CH₃OH, C₂H₅OH, H₂),
-and the human-in-the-loop interaction collects yields for all products.
+Domain specifics (feature schema, product columns, prompts, simulation)
+are supplied by a ``TaskBase`` instance (default: ``CO2RRTask``).
 
 Key design choices following REVIEW_REPORT corrections:
 - Normalization uses explicit design-space bounds, not training data min/max.
@@ -18,10 +17,11 @@ Key design choices following REVIEW_REPORT corrections:
 
 Usage::
 
-    from co2rr_bo import CO2RROptimizer
+    from kabo import KABOOptimizer, CO2RRTask
 
-    optimizer = CO2RROptimizer(
+    optimizer = KABOOptimizer(
         data_path="data/data.csv",
+        task=CO2RRTask(),
         target_product="CO",
     )
     optimizer.run(n_iterations=10, interactive=True)
@@ -39,52 +39,36 @@ import numpy as np
 import pandas as pd
 import torch
 
-from co2rr_bo.acquisition import (
-    build_kabo,
-    build_qnei,
-    build_ucb,
-    evaluate_discrete_candidates,
+from kabo.acquisition import (
     load_discrete_candidates,
-    optimize_continuous,
     print_best_found,
     print_recommendations,
     prompt_user_candidate_choice,
-    prompt_user_input_multiproduct,
     prompt_user_manual_candidate,
     prompt_user_nonselected_features,
-    simulate_multiproduct_yields,
 )
-from co2rr_bo.candidate import CandidateRecord
-from co2rr_bo.constants import (
-    ALL_FEATURE_COLUMNS,
-    ALL_PRODUCT_COLUMNS,
-    DEFAULT_TARGET_PRODUCT,
-    DESIGN_SPACE_BOUNDS,
-    PRODUCT_COLUMNS,
-    PRODUCT_NAMES,
-    TARGET_COLUMN,
-)
-from co2rr_bo.feature_selection import (
+from kabo.candidate import CandidateRecord
+from kabo.constants import TARGET_COLUMN
+from kabo.engine import KABOEngine
+from kabo.task import CO2RRTask, TaskBase
+from kabo.feature_selection import (
     load_and_validate_data,
     plot_feature_importances,
     select_top_k_features,
     train_random_forest,
 )
-from co2rr_bo.surrogate import SurrogateModel
-from co2rr_bo.utils import (
+from kabo.utils import (
     get_logger,
     select_device,
     set_global_seed,
     unnormalize_x,
 )
-from co2rr_bo.preference import PreferenceModel
-from co2rr_bo.knowledge import ExpertPrior
 
 logger = get_logger(__name__)
 
 
-class CO2RROptimizer:
-    """Bayesian Optimization pipeline for photocatalytic CO2RR.
+class KABOOptimizer:
+    """Task-driven Bayesian Optimization pipeline.
 
     This class orchestrates the full three-phase workflow:
         1. Feature importance evaluation & top-K selection via Random Forest
@@ -92,9 +76,11 @@ class CO2RROptimizer:
         2. GP surrogate model setup using BoTorch (SingleTaskGP + ARD Matérn).
         3. UCB acquisition function optimization with human-in-the-loop.
 
-    The pipeline supports multi-product CO2RR yield optimization.
-    Products include: CO, HCOOH, CH₄, C₂H₄, CH₃OH, C₂H₅OH, H₂.
-    The user selects which product to maximize via ``target_product``.
+    Domain specifics — feature schema, design-space bounds, product
+    columns, interactive prompts, and demo-mode simulation — are supplied
+    by the ``task`` argument (a ``TaskBase`` subclass).  The user selects
+    which target product to maximize via ``target_product``; when
+    omitted, the task's ``default_target()`` is used.
 
     The methodology follows the GP-UCB algorithm (Algorithm 2) and
     Human-in-the-Loop BO workflow (Algorithm 3) described in
@@ -166,7 +152,8 @@ class CO2RROptimizer:
     def __init__(
         self,
         data_path: str | Path,
-        target_product: str = DEFAULT_TARGET_PRODUCT,
+        task: Optional[TaskBase] = None,
+        target_product: Optional[str] = None,
         top_k: int = 10,
         beta: float = 2.0,
         beta_schedule: str = "fixed",
@@ -193,6 +180,9 @@ class CO2RROptimizer:
         pe_budget: int = 0,
         lambda_v: float = 0.0,
     ) -> None:
+        # Domain layer: default to CO2RR task for backward compatibility.
+        self.task: TaskBase = task if task is not None else CO2RRTask()
+
         self.data_path = Path(data_path)
         self.top_k = top_k
         self.beta = beta
@@ -270,24 +260,24 @@ class CO2RROptimizer:
         self.device = select_device(device)
         logger.info("Using device: %s", self.device)
 
-        # Resolve target product to column name
-        self.target_product = target_product.upper()
-        if self.target_product in PRODUCT_COLUMNS:
-            self.target_column = PRODUCT_COLUMNS[self.target_product]
-        elif target_product in ALL_PRODUCT_COLUMNS:
-            self.target_column = target_product
-        else:
-            self.target_column = TARGET_COLUMN
-            logger.warning(
-                "Product '%s' not recognized. "
-                "Falling back to legacy target column '%s'. "
-                "Valid products: %s",
-                target_product, TARGET_COLUMN,
-                ", ".join(PRODUCT_COLUMNS.keys()),
-            )
+        # Resolve target product to column name via the Task layer.
+        resolved_product = (
+            target_product if target_product is not None
+            else self.task.default_target()
+        )
+        self.target_product = (
+            resolved_product.upper()
+            if isinstance(resolved_product, str) else resolved_product
+        )
+        self.target_column = self.task.resolve_target_column(resolved_product)
 
-        target_name = PRODUCT_NAMES.get(self.target_column, self.target_column)
-        logger.info("Target product: %s (%s)", target_name, self.target_column)
+        target_name = self.task.product_names().get(
+            self.target_column, self.target_column
+        )
+        logger.info(
+            "Task: %s | Target product: %s (%s)",
+            self.task.task_name(), target_name, self.target_column,
+        )
 
         if self.skip_feature_selection:
             logger.info(
@@ -335,12 +325,25 @@ class CO2RROptimizer:
         self.df: pd.DataFrame = pd.DataFrame()
         self.selected_features: list[str] = []
         self.feature_importances: pd.Series = pd.Series(dtype=float)
-        self.surrogate = SurrogateModel(self.device)
-        self.preference_model = PreferenceModel(self.device)
-        self.expert_prior: Optional[ExpertPrior] = None
 
-        # Design-space bounds (can be customized)
-        self.design_bounds: dict[str, tuple[float, float]] = dict(DESIGN_SPACE_BOUNDS)
+        # Algorithmic core: system-agnostic Bayesian Optimization engine.
+        self.engine = KABOEngine(
+            device=self.device,
+            kernel_type=self.kernel_type,
+            acq_strategy=self.acq_strategy,
+            qnei_mc_samples=self.qnei_mc_samples,
+            n_restarts=self.n_restarts,
+            raw_samples=self.raw_samples,
+            kabo_mode=self.kabo_mode,
+            lambda_p=self.lambda_p,
+            lambda_k=self.lambda_k,
+            lambda_v=self.lambda_v,
+        )
+
+        # Design-space bounds (sourced from the Task; can be customized)
+        self.design_bounds: dict[str, tuple[float, float]] = (
+            self.task.design_space_bounds()
+        )
 
         # Discrete candidates df (cached after first load for row lookups)
         self._discrete_candidates_df: Optional[pd.DataFrame] = None
@@ -411,10 +414,15 @@ class CO2RROptimizer:
         self.df = load_and_validate_data(
             self.data_path,
             self.target_column,
+            all_feature_columns=self.task.feature_columns(),
+            all_product_columns=self.task.all_product_columns(),
+            product_names=self.task.product_names(),
             strict_feature_schema=self.strict_training_schema,
         )
 
-        available_features = [c for c in ALL_FEATURE_COLUMNS if c in self.df.columns]
+        available_features = [
+            c for c in self.task.feature_columns() if c in self.df.columns
+        ]
 
         if self.skip_feature_selection:
             # P1-1: Skip RF, use all available features
@@ -429,6 +437,7 @@ class CO2RROptimizer:
             _, importances, _ = train_random_forest(
                 self.df,
                 target_column=self.target_column,
+                all_feature_columns=self.task.feature_columns(),
                 n_estimators=self.rf_n_estimators,
                 random_state=self.seed if self.seed is not None else 42,
             )
@@ -437,6 +446,8 @@ class CO2RROptimizer:
             plot_feature_importances(
                 importances, self.top_k, self.output_dir,
                 target_column=self.target_column,
+                product_names=self.task.product_names(),
+                task_name=self.task.task_name(),
             )
 
             self.selected_features = select_top_k_features(
@@ -468,38 +479,19 @@ class CO2RROptimizer:
         X_raw = self.df[self.selected_features].values.astype(np.float64)
         Y_raw = self._build_training_target(self.df)
 
-        self.surrogate.fit(
+        self.engine.fit_surrogate(
             X_raw, Y_raw, self.selected_features,
             design_bounds=self.design_bounds,
-            kernel_type=self.kernel_type,
         )
         logger.info("Phase 2 complete.")
 
     def _build_training_target(self, df: pd.DataFrame) -> np.ndarray:
-        """Build the surrogate training target from raw product columns.
-
-        Returns either the original target product or a selectivity-aware
-        composite objective that penalizes hydrogen evolution.
-        """
-        y_target = df[self.target_column].values.astype(np.float64)
-        if self.h2_penalty_weight <= 0.0:
-            return y_target
-
-        if "Y_H2" not in df.columns:
-            logger.warning(
-                "h2_penalty_weight > 0 but 'Y_H2' column is missing. "
-                "Falling back to single-target objective."
-            )
-            return y_target
-
-        y_h2 = df["Y_H2"].values.astype(np.float64)
-        y_composite = y_target - self.h2_penalty_weight * y_h2
-        logger.info(
-            "Using composite objective: %s - %.4f * Y_H2",
+        """Build the surrogate training target via the Task layer."""
+        return self.task.build_training_target(
+            df,
             self.target_column,
-            self.h2_penalty_weight,
+            h2_penalty_weight=self.h2_penalty_weight,
         )
-        return y_composite
 
     # ===================================================================
     #  PHASE 3
@@ -531,7 +523,9 @@ class CO2RROptimizer:
         pd.DataFrame
             Updated dataset with all product yields.
         """
-        target_name = PRODUCT_NAMES.get(self.target_column, self.target_column)
+        target_name = self.task.product_names().get(
+            self.target_column, self.target_column
+        )
 
         logger.info("=" * 60)
         logger.info("PHASE 3: Acquisition & Human-in-the-Loop Optimization")
@@ -545,19 +539,19 @@ class CO2RROptimizer:
             n_iterations,
         )
 
-        if self.surrogate.model is None:
+        if self.engine.surrogate_model is None:
             raise RuntimeError("Phase 2 must be run before Phase 3.")
 
         if self.kabo_mode:
-            self.expert_prior = ExpertPrior(
-                config_path=self.expert_prior_file,
-                selected_features=self.selected_features,
-                bounds_raw=self.surrogate.bounds_raw,
-                device=self.device,
+            self.engine.init_expert_prior(
+                self.expert_prior_file,
+                self.selected_features,
             )
 
         self._discrete_candidates_df = load_discrete_candidates(
-            self.candidates_path, self.selected_features
+            self.candidates_path, self.selected_features,
+            all_feature_columns=self.task.feature_columns(),
+            design_bounds=self.design_bounds,
         )
 
         K = len(self.selected_features)
@@ -578,23 +572,22 @@ class CO2RROptimizer:
                 and interactive
                 and self._discrete_candidates_df is not None
             ):
+                bounds = self.engine.bounds_raw
                 for _, row in self._discrete_candidates_df.iterrows():
                     vals = [row[f] for f in self.selected_features]
                     raw_t = torch.tensor(vals, dtype=torch.double, device=self.device)
-                    norm_t = (raw_t - self.surrogate.bounds_raw[0]) / (
-                        self.surrogate.bounds_raw[1] - self.surrogate.bounds_raw[0]
-                    )
+                    norm_t = (raw_t - bounds[0]) / (bounds[1] - bounds[0])
                     pe_pool.append(norm_t)
 
             if len(pe_pool) >= 2 and self.pe_budget > 0:
-                pe_queries = self.preference_model.generate_pe_queries(
+                pe_queries = self.engine.generate_pe_queries(
                     pe_pool, n_queries=self.pe_budget
                 )
                 for q_idx, (a, b) in enumerate(pe_queries, 1):
                     cand_a = pe_pool[a]
                     cand_b = pe_pool[b]
-                    cand_a_raw = unnormalize_x(cand_a, self.surrogate.bounds_raw)
-                    cand_b_raw = unnormalize_x(cand_b, self.surrogate.bounds_raw)
+                    cand_a_raw = unnormalize_x(cand_a, self.engine.bounds_raw)
+                    cand_b_raw = unnormalize_x(cand_b, self.engine.bounds_raw)
 
                     print(f"\n  🎯 PE Query {q_idx}/{len(pe_queries)}:")
                     print(f"     Option A: {dict(zip(self.selected_features, [f'{v:.3f}' for v in cand_a_raw.tolist()]))}")
@@ -605,13 +598,13 @@ class CO2RROptimizer:
                         try:
                             ans = input("     PE choice: ").strip().lower()
                             if ans in ("a", "1"):
-                                self.preference_model.add_comparisons(
+                                self.engine.add_preference_pair(
                                     winner_norm=cand_a, losers_norm=[cand_b]
                                 )
                                 logger.info("PE query %d: A preferred.", q_idx)
                                 break
                             elif ans in ("b", "2"):
-                                self.preference_model.add_comparisons(
+                                self.engine.add_preference_pair(
                                     winner_norm=cand_b, losers_norm=[cand_a]
                                 )
                                 logger.info("PE query %d: B preferred.", q_idx)
@@ -625,41 +618,24 @@ class CO2RROptimizer:
                             break
 
                 # Re-fit preference model after PE queries
-                self.preference_model.fit()
+                self.engine.refit_preference()
 
-            # 1. Build acquisition function
+            # 1. Build acquisition function (UCB/qNEI + optional KABO wrap)
             if self.acq_strategy == "ucb":
                 beta_t = self._compute_beta_t(iteration, K)
                 self._beta_trace.append(beta_t)
                 logger.info("Using UCB with β_t = %.6f", beta_t)
-                acq_func = build_ucb(self.surrogate.model, beta_t)
             else:
+                beta_t = float(self.beta)
                 logger.info(
                     "Using qNEI (Monte Carlo, mc_samples=%d)",
                     self.qnei_mc_samples,
                 )
-                acq_func = build_qnei(
-                    self.surrogate.model,
-                    num_mc_samples=self.qnei_mc_samples,
-                )
 
-            # 1.5 Wrap with KABO if enabled
-            if self.kabo_mode:
-                self.preference_model.fit()
-                acq_func = build_kabo(
-                    base_acq_func=acq_func,
-                    preference_model=self.preference_model,
-                    expert_prior=self.expert_prior,
-                    lambda_p=self.lambda_p,
-                    lambda_k=self.lambda_k,
-                    lambda_v=self.lambda_v,
-                )
+            acq_func = self.engine.build_acquisition(beta=beta_t)
 
             # 2. Optimize over continuous [0,1]^K
-            cont_cand, cont_val = optimize_continuous(
-                acq_func, K, self.device,
-                self.n_restarts, self.raw_samples,
-            )
+            cont_cand, cont_val = self.engine.suggest_continuous(acq_func, K)
 
             # 3. Collect all candidates
             all_candidates: list[torch.Tensor] = [cont_cand]
@@ -668,11 +644,11 @@ class CO2RROptimizer:
             all_orig_rows: list[int] = [-1]  # -1 = no original row
 
             if self._discrete_candidates_df is not None:
-                disc_results = evaluate_discrete_candidates(
+                disc_results = self.engine.evaluate_discrete(
                     acq_func, self._discrete_candidates_df,
                     self.selected_features,
-                    self.surrogate.bounds_raw,
-                    self.device,
+                    all_feature_columns=self.task.feature_columns(),
+                    design_bounds=self.design_bounds,
                 )
                 for i, (cand, val, orig_idx) in enumerate(disc_results):
                     all_candidates.append(cand)
@@ -685,7 +661,7 @@ class CO2RROptimizer:
             pre_choice_overrides: list[str] = []
             if interactive and self.pre_fill_before_choice:
                 nonselected_pre = [
-                    f for f in ALL_FEATURE_COLUMNS
+                    f for f in self.task.feature_columns()
                     if f not in self.selected_features
                     and f in self.df.columns
                 ]
@@ -707,9 +683,11 @@ class CO2RROptimizer:
             top_indices = print_recommendations(
                 all_candidates, all_acq_values, all_sources,
                 all_orig_rows, self._discrete_candidates_df,
-                self.selected_features, ALL_FEATURE_COLUMNS,
-                self.surrogate.bounds_raw,
-                iteration, self.target_column, top_n_recommend,
+                self.selected_features, self.task.feature_columns(),
+                self.engine.bounds_raw,
+                iteration, self.target_column,
+                product_names=self.task.product_names(),
+                top_n=top_n_recommend,
                 continuous_nonselected_values=(
                     pre_choice_prefills
                     if interactive and self.pre_fill_before_choice
@@ -747,7 +725,7 @@ class CO2RROptimizer:
 
                 if chosen_idx == -1:
                     manual_payload = prompt_user_manual_candidate(
-                        ALL_FEATURE_COLUMNS,
+                        self.task.feature_columns(),
                         self.design_bounds,
                     )
                     if manual_payload is None:
@@ -764,7 +742,7 @@ class CO2RROptimizer:
                         overrides = list(pre_choice_overrides)
                     else:
                         nonselected = [
-                            f for f in ALL_FEATURE_COLUMNS
+                            f for f in self.task.feature_columns()
                             if f not in self.selected_features
                             and f in self.df.columns
                         ]
@@ -777,8 +755,8 @@ class CO2RROptimizer:
                                 nonselected, self.design_bounds
                             )
 
-                # Collect product yields
-                product_yields = prompt_user_input_multiproduct(
+                # Collect product yields via Task hook
+                product_yields = self.task.prompt_observation(
                     self.target_column
                 )
                 if product_yields is None:
@@ -787,14 +765,14 @@ class CO2RROptimizer:
             else:
                 # Demo mode: auto-select rank #1
                 chosen_idx = top_indices[0]
-                product_yields = simulate_multiproduct_yields(
+                product_yields = self.task.simulate_observation(
                     self.target_column,
-                    self.surrogate.y_mean,
-                    self.surrogate.y_std,
+                    self.engine.y_mean,
+                    self.engine.y_std,
                 )
                 logger.info("[Demo mode] Simulated yields:")
                 for col, val in product_yields.items():
-                    name = PRODUCT_NAMES.get(col, col)
+                    name = self.task.product_names().get(col, col)
                     logger.info("  %s = %.2f", name, val)
 
             # 6. Build CandidateRecord and append observation
@@ -816,10 +794,11 @@ class CO2RROptimizer:
                 chosen_source = all_sources[chosen_idx]
                 chosen_acq_value = all_acq_values[chosen_idx]
 
-                cand_raw_np = unnormalize_x(chosen_cand_norm, self.surrogate.bounds_raw)
+                cand_raw_np = unnormalize_x(chosen_cand_norm, self.engine.bounds_raw)
+                feature_columns = self.task.feature_columns()
                 if chosen_orig_row >= 0 and self._discrete_candidates_df is not None:
                     orig_row_s = self._discrete_candidates_df.iloc[chosen_orig_row]
-                    for f in ALL_FEATURE_COLUMNS:
+                    for f in feature_columns:
                         if f in orig_row_s.index and pd.notna(orig_row_s[f]):
                             raw_vals[f] = float(orig_row_s[f])
                         elif f in self.selected_features:
@@ -829,7 +808,7 @@ class CO2RROptimizer:
                             lo, hi = self.design_bounds.get(f, (0.0, 1.0))
                             raw_vals[f] = (lo + hi) / 2.0
                 else:
-                    for f in ALL_FEATURE_COLUMNS:
+                    for f in feature_columns:
                         if f in self.selected_features:
                             f_idx = self.selected_features.index(f)
                             raw_vals[f] = float(cand_raw_np[f_idx])
@@ -845,7 +824,7 @@ class CO2RROptimizer:
                 }
             
             invalid_full_fields: list[str] = []
-            for f in ALL_FEATURE_COLUMNS:
+            for f in self.task.feature_columns():
                 val = raw_vals.get(f, np.nan)
                 lo, hi = self.design_bounds.get(f, (-np.inf, np.inf))
                 if pd.isna(val) or val < lo or val > hi:
@@ -909,7 +888,7 @@ class CO2RROptimizer:
                     )
                     losers_norm = [all_candidates[idx] for idx in top_indices]
                     if losers_norm:
-                        self.preference_model.add_comparisons(
+                        self.engine.add_preference_pair(
                             winner_norm=manual_norm_tensor,
                             losers_norm=losers_norm,
                         )
@@ -919,7 +898,7 @@ class CO2RROptimizer:
                         for idx in top_indices
                         if idx != chosen_idx
                     ]
-                    self.preference_model.add_comparisons(
+                    self.engine.add_preference_pair(
                         winner_norm=all_candidates[chosen_idx],
                         losers_norm=losers_norm,
                     )
@@ -931,7 +910,11 @@ class CO2RROptimizer:
 
             self.phase2_fit_surrogate()
 
-        print_best_found(self.df, self.selected_features, self.target_column)
+        print_best_found(
+            self.df, self.selected_features, self.target_column,
+            all_product_columns=self.task.all_product_columns(),
+            product_names=self.task.product_names(),
+        )
         return self.df
 
     # ===================================================================
@@ -966,8 +949,8 @@ class CO2RROptimizer:
                 ", ".join(candidate_record.overridden_fields)
             )
 
-        # Fill all product yield columns
-        for col_name in ALL_PRODUCT_COLUMNS:
+        # Fill all product yield columns (sourced from the Task)
+        for col_name in self.task.all_product_columns():
             new_row[col_name] = product_yields.get(col_name, np.nan)
             
         new_row["expert_rank"] = candidate_record.expert_rank
@@ -1001,9 +984,11 @@ class CO2RROptimizer:
         pd.DataFrame
             The final updated dataset.
         """
-        target_name = PRODUCT_NAMES.get(self.target_column, self.target_column)
+        target_name = self.task.product_names().get(
+            self.target_column, self.target_column
+        )
 
-        logger.info("Starting CO2RR Bayesian Optimization Pipeline")
+        logger.info("Starting %s Bayesian Optimization Pipeline", self.task.task_name())
         logger.info("Data: %s | Target: %s | K=%d | β=%.2f",
                      self.data_path.name, target_name,
                      self.top_k, self.beta)
@@ -1057,3 +1042,9 @@ class CO2RROptimizer:
         logger.info("Run metadata saved to: %s", metadata_path)
 
         return result_df
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility alias for pre-generalization code paths.
+# ---------------------------------------------------------------------------
+CO2RROptimizer = KABOOptimizer
