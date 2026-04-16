@@ -1,0 +1,329 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, bm}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{caption}
+\usepackage{cite}
+\geometry{margin=1in}
+
+% 启用中文支持
+\usepackage{ctex}
+
+% 将 hyperref 放置在最后，并显式配置内部链接和颜色
+\usepackage[colorlinks=true, linkcolor=blue, anchorcolor=blue, citecolor=blue, urlcolor=blue, bookmarksnumbered=true]{hyperref}
+
+\title{\textbf{基于知识增强贝叶斯优化的光催化 \\ CO$_2$ 还原多产物预测与材料设计架构}}
+\author{Jiayu Wu}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+光催化二氧化碳还原反应 (CO$_2$RR) 的材料探索受限于多物理化学属性相互交织所带来的高维搜索空间，叠加实验试错的巨额时间成本，传统经验式寻优极为低效。本文提出并实现了针对该问题量身定制的\textbf{知识增强贝叶斯优化}（Knowledge-Augmented Bayesian Optimization, KABO）计算框架。该框架在"人类在环"贝叶斯优化（HITL-BO）的基础上，进一步整合了偏好学习（Preference Learning）、专家先验编码（Expert Prior Encoding）、偏好探索子循环（Preference Exploration）以及近似信息价值驱动（Approximate VOI）等知识内化机制，实现了从被动接受人类反馈到主动学习与沉淀专家知识的范式转化。框架支持包含 CO、HCOOH、CH$_4$ 在内的多种 CO$_2$ 还原反应产物的收率最优化。针对多尺度物理问题带来的"维数灾难"，系统将随机森林降维前置，与带自动关联性确定（ARD）机制的 Mat\'{e}rn 高斯过程代理模型相融合，配合在线 z-score 标定的四项复合采集函数，在保持贝叶斯推断严格性的前提下有效平衡了开发-探索-知识-偏好四维目标。
+
+\textbf{关键词}：光催化；CO$_2$ 还原；贝叶斯优化；高斯过程；知识增强；偏好学习；人类在环设计
+\end{abstract}
+
+\vspace{2em}
+\tableofcontents
+\newpage
+
+\section{引言 (Introduction)}
+
+光催化二氧化碳还原成为应对气候变化、将 CO$_2$ 转化为高价值化学品（如 CO、甲酸、甲烷甚至多碳醇类）的革新性道路之一\cite{nature2025, jacs2024}。然而，在实际研究与工业运用中，催化剂性能（收率法拉第效率）呈高度复杂的非凸变化。这些特性受到多达数十个参数的共同控制（如能带间隙、描述符 A\_pI、反应位点等），在如此高维度和实验测量存在固有噪音的影响下，催化系统表现出显著的非线性行为。以往依赖高通量筛选 (HTS)\cite{nature2025} 与全穷举实验的方法容易受到"维数灾难"的桎梏。
+
+应对昂贵评估函数的典型高效最优化范式当属贝叶斯优化 (Bayesian Optimization, BO) \cite{bo2012}。尽管标准 BO 理论对黑盒导数的评估是严密自洽的，但在真实的化学实验室设定里有明显鸿沟：一方面量纲差异下多元映射不稳定\cite{turbo2019}；另一方面实验专家的领域直觉难以被代理模型结构性地"内化"。因此，本报告在原始 HITL-BO 框架基础上，进一步发展出知识增强贝叶斯优化 (KABO) 体系。该体系将理论 GP-UCB \cite{gpucb2026} 演变为四阶段融合系统：降维筛选 (Phase 1) $\rightarrow$ 高斯特征代理重建 (Phase 2) $\rightarrow$ 偏好探索与知识采集 (Phase 2.5) $\rightarrow$ 知识增强采集-交互闭环 (Phase 3)，并通过偏好学习\cite{astudillo2019}、专家先验编码\cite{li2020prior}及近似信息价值\cite{wu2016kg}三条路径实现知识的持久内化与循环利用。
+
+
+
+\section{系统框架与描述符特征拆分 (System Architecture \& Feature Descriptor Splitting)}
+
+原始输入数据集 ($X \in \mathbb{R}^{N \times 19}$) 映射到 19 项独立物理化学描述符 (Descriptors)，并覆盖了 CO$_2$ 还原体系的主要特征和结构指标。若强行使用 19 维特征展开代理模型拟合，受制于局部低信噪比与可获取数据点数量，预测面可能会落入过度平滑或局部震荡两个极端。因此，系统实现了分离式的提取和重建机制，并使用"前置填补 (Pre-fill-before-choice)"逻辑予以修复。
+
+\subsection{非线性特征拆分及基尼重要度评判}
+有别于线性主成分分析 (PCA) 带来的物理解释性丧失，我们依靠随机森林树群对所有维度特征作相对重要度（Feature Importances）估算，并截断以保留 Top-$K$ 描述符：
+
+\begin{equation}
+    \text{Imp}(x_j) = \frac{1}{N_{trees}} \sum_{t=1}^{N_{trees}} \sum_{s \in \text{nodes}(t), v(s) = x_j} p(s) \cdot \Delta I(s)
+\end{equation}
+
+$\Delta I(s)$ 为基于特征 $x_j$ 拆解引起的杂质 (通常为方差) 下降，$p(s)$ 为节点权重。此阶段确保最不相关或最受噪声干扰的维度在 GP-BO 前即被丢弃，生成 $X_{selected} \in \mathbb{R}^{N \times K}$，并保证了随后的局部采样有效性\cite{turbo2019}。
+
+\subsection{缺失特征重构与"Pre-fill-before-choice"机制}
+剥离了弱关联维度后，算法在获取最新优化点 $x^*_{cont} \in \mathbb{R}^K$ 计算最优收率。然而由于真实合成需全套 19 维配方基准（Strict Feature Schema），若静默抛弃则将直接导致复审阶段化学可行性错位。为此架构引入 \textbf{基于历史映射的前突预填充 (Pre-fill-before-choice)}，对那些处于 $X_{non-selected}$ 的特征，采用数据集同源近似插值或默认基准将其恢复投影至原始 19 维设计域，在呈现给领域专家前保证描述符状态闭环，既发挥了降维优势又实现了信息一致保真。
+
+
+
+\section{高斯过程代理模型的数学重构 (Surrogate Model Mathematical Reformulation)}
+
+\subsection{具有独立长度尺度的 ARD Mat\'{e}rn 核}
+利用观测对象 $\mathcal{D}_N = \{X_{selected}^{(i)}, y^{(i)}\}_{i=1}^N$ 构建代理模型 $f(X) \sim \mathcal{GP}(\mu, k(X, X'))$。
+
+化学体系内诸如功函数(eV)或者比表面积($\text{m}^2/\text{g}$)的标度差异悬殊，采用通用的欧里几得度量会导致量纲坍塌。报告选择采用带 \textbf{自动关联性决定 (Automatic Relevance Determination, ARD)} 的 Mat\'{e}rn 核，其平滑度设置为 $\nu = 2.5$ 兼顾不可导的高频震荡：
+\begin{equation}
+    k_{\text{Mat\'{e}rn } 2.5}(x, x') = \sigma_f^2 \left( 1 + \sqrt{5} d_{\text{ARD}} + \frac{5}{3} d_{\text{ARD}}^2 \right) \exp\left( -\sqrt{5} d_{\text{ARD}} \right)
+\end{equation}
+引入加权对角矩阵，对经过特征筛选存留的 $K$ 维变量实现独立长度尺度缩放 $l_k$：
+\begin{equation}
+    d_{\text{ARD}}(x, x') = \sqrt{ \sum_{k=1}^K \frac{(x_k - x'_k)^2}{l_k^2} }
+\end{equation}
+此处 $l_k$ 的自适应有效补偿了特征值之间的刚性错位。对于更为复杂的形貌突变响应曲面，引入复合频谱混合核 (Spectral Mixture Kernels)\cite{catbox2025} 的设计作为可选接口已被预留。
+
+\subsection{物理显式的边界感知归一化 (Bounds-Aware Normalization)}
+数据映射至 $[0,1]^K$ 是 BO 后端的常态化要求。但传统机器学习常采用 $\text{MinMax}(X_{train})$，这会在模型外推超出历史样本极大极小值时产生灾难性失真：
+系统改用\textbf{理论设计域外推下界归一化}，设外部专家给予已知特征的实验理论边界配置字典 \texttt{DESIGN\_SPACE\_BOUNDS} 为 $(l^{(c)}, u^{(c)})$：
+\begin{equation}
+    x_{norm, k} = \max \left( 0, \;\min \left( 1, \; \frac{x_k - l^{(k)}}{u^{(k)} - l^{(k)}} \right) \right)
+\end{equation}
+这强制确立了高斯边缘回归能够无缝探针"未开发区域"，完全杜绝由训练记录极限作为归一化分母引起的伪外推偏误。
+
+\subsection{超参数的边际对数似然估计}
+为确定核平稳方差 $\sigma_f^2$，观测白噪声方差 $\sigma_n^2$ 以及尺度向量 $\mathbf{l}$，对高斯模型作边际分布积分，最大化 Exact Marginal Log-Likelihood (MLL)：
+\begin{equation}
+    \log p(\mathbf{y} | X, \bm{\theta}) = -\frac{1}{2} \mathbf{y}^\top (K(X, X; \bm{\theta}) + \sigma_n^2 I)^{-1} \mathbf{y} - \frac{1}{2} \log|K(X, X; \bm{\theta}) + \sigma_n^2 I| - \frac{N}{2} \log 2\pi
+\end{equation}
+求解过程使用 L-BFGS-B 或基于 Torch 的梯度下降展开。
+
+
+
+\section{基础采集策略 (Base Acquisition Strategies)}
+
+高分辨收率测定常带有由于光源扰动或杂质吸附带来的固有环境噪声。我们结合问题情况，融合了置信区间探索与带噪期望改进两类算法基准。
+
+\subsection{基于 UCB 的时频调度}
+依据 Ding et al.\cite{gpucb2026} 之 GP-UCB 理论准则，最大化置信上边界即可在探索不确定区域(Exploration)与收割当前高收率点(Exploitation)产生黄金折中：
+\begin{equation}
+    \alpha_{\text{UCB}}(x) = \mu_{t-1}(x) + \beta_t^{1/2} \sigma_{t-1}(x)
+\end{equation}
+本框架设计支持按迭代轮数动态控制退火机制（\texttt{theory} 模式，随着采样深化提升 $\beta_t$ 防止困于局部极值），或是保留用户指定恒定探索参数。此外还提供 \texttt{theory-strict} 模式以纯理论公式计算 $\beta_t$（不再乘以用户 \texttt{beta} 缩放因子），用于高保真论文复现。
+
+\subsection{噪声干扰下的 Expected Improvement (qNEI)}
+为了使得收率优化针对环境干扰有更强鲁棒性\cite{cbo2017}，BoTorch 引擎底层的带噪期望提升
+函数 (\texttt{qNoisyExpectedImprovement}) 运用蒙特卡洛法整合观测概率提升：
+\begin{equation}
+    \alpha_{\text{qNEI}}(x) = \mathbb{E}_{y|x \sim \mathcal{N}}\left[ \max(y - y_{best}^*,\, 0) \right]
+\end{equation}
+使用 128 采样数目的近似 SobolQMCNormalSampler 对高阶期望作 Quasi-Monte Carlo 无偏估计\cite{botorch2019}。
+
+
+
+\section{知识增强贝叶斯优化 (Knowledge-Augmented Bayesian Optimization)}
+
+标准 HITL-BO 中，专家反馈仅体现为单次候选选择，其蕴含的偏好模式和领域知识未被结构性沉淀。为弥合这一鸿沟，我们构建了知识增强贝叶斯优化 (KABO) 框架，通过三条知识通道注入结构化先验：
+
+\subsection{KABO 复合采集函数}
+KABO 的核心是一个四项加权组合采集函数。为防止各项因量纲与数值范围差异导致的信号压制问题，在组合前对每一项做在线 z-score 标准化：
+\begin{equation}
+    \alpha_{\text{KABO}}(x) = z\bigl(\alpha_{\text{base}}(x)\bigr)
+    + \lambda_p \cdot z\bigl(\text{Pref}_{\text{MC}}(x)\bigr)
+    + \lambda_k \cdot z\bigl(\text{Prior}(x)\bigr)
+    + \lambda_v \cdot z\bigl(\text{VOI}(x)\bigr)
+    \label{eq:kabo}
+\end{equation}
+其中 $z(\cdot)$ 为当前评估批次的 z-score 归一化算子：
+\begin{equation}
+    z(t) = \frac{t - \bar{t}}{\hat{\sigma}_t + \epsilon}, \quad \hat{\sigma}_t = \sqrt{\frac{1}{n} \sum_{i=1}^n (t_i - \bar{t})^2}, \quad \epsilon = 10^{-8}
+\end{equation}
+当批次为单元素或标准差为零时，$z(\cdot)$ 返回全零向量以避免数值退化。各项含义如下：
+
+\begin{itemize}
+    \item $\alpha_{\text{base}}$：基础采集（UCB 或 qNEI），提供代理模型驱动的探索-开发平衡。
+    \item $\text{Pref}_{\text{MC}}$：偏好后验的蒙特卡洛积分得分（见 \ref{sec:pref}）。
+    \item $\text{Prior}$：基于 JSON 配置的专家先验打分（见 \ref{sec:prior}）。
+    \item $\text{VOI}$：代理模型后验方差作为信息价值近似（见 \ref{sec:voi}）。
+\end{itemize}
+权重 $\lambda_p, \lambda_k, \lambda_v \geq 0$ 均可通过 CLI 参数配置，默认 $\lambda_p = \lambda_k = 1.0$，$\lambda_v = 0.0$（关闭）。
+
+\subsection{偏好学习与蒙特卡洛效用积分}
+\label{sec:pref}
+
+专家在每轮迭代中选择执行某一候选而非其余，这构成了一组典型的成对比较数据 (Pairwise Comparison)。我们使用 BoTorch 的 PairwiseGP\cite{botorch2019} 以 Bradley-Terry 模型建模专家效用函数 $u(x)$：
+
+\begin{equation}
+    P(\text{$x_i$ 优于 $x_j$}) = \Phi\bigl(u(x_i) - u(x_j)\bigr), \quad u \sim \mathcal{GP}(\mathbf{0}, k_{\text{pref}})
+\end{equation}
+
+其中 $\Phi$ 为标准正态CDF，$k_{\text{pref}}$ 为偏好空间上的 ARD Mat\'{e}rn 核。
+
+\textbf{关键改进}：依照 Astudillo \& Frazier (2019)\cite{astudillo2019} 的 EI-UU（Expected Improvement under Utility Uncertainty）框架，我们不使用偏好后验均值 $\mathbb{E}[u(x)|\mathcal{D}]$ 作为点估计，而是对效用后验做蒙特卡洛积分：
+\begin{equation}
+    \text{Pref}_{\text{MC}}(x) = \frac{1}{S} \sum_{s=1}^{S} u^{(s)}(x), \quad u^{(s)} \sim p(u | \mathcal{D}_{\text{pref}})
+\end{equation}
+默认 $S = 16$ 个后验采样，通过重参数化技巧 (\texttt{rsample}) 实现。该方法保留了效用不确定性信息，避免过早锁定可能偏差的偏好估计。
+
+\textbf{偏好数据去重}：为防止候选重复导致比较图冗余膨胀，在写入偏好数据前对新点做 $L_2$ 近邻查重（阈值 $\epsilon = 10^{-4}$），匹配到已有节点时复用其索引。
+
+\textbf{三态偏好支持}：交互界面支持 winner / loser / \textbf{tie} 三种回答。Tie 声明不写入偏好模型（BoTorch PairwiseGP 不原生支持等价标签），仅作审计记录，出现次数计入 \texttt{tie\_count} 并写入实验元数据，当 tie 占比超过阈值时可触发模型扩展评估。
+
+\subsection{专家先验编码}
+\label{sec:prior}
+
+领域专家对某些描述符特征具有先验判断（例如``最优电位在 $-1.0$ 至 $-0.6$ V 范围''）。系统通过 JSON 配置文件将这些知识编码为参数化分布（支持高斯和均匀两种形式），并在采集评估时产生先验打分：
+
+\begin{equation}
+    \text{Prior}(x) = \sum_{k \in \mathcal{K}} S_k(x_k)
+\end{equation}
+
+其中 $\mathcal{K}$ 为有先验配置的特征子集。对于高斯先验，$S_k(x_k) = -\frac{(x_k - \mu_k)^2}{2\sigma_k^2}$，即对数密度核；对于均匀先验，在区间外施加常数惩罚。
+
+\textbf{先验校验流程 (Prior Predictive Check)}：新增的 \texttt{scripts/validate\_prior.py} 工具对 JSON 配置执行：(1) 参数合法性校验（$\sigma > 0$，$\min < \max$）；(2) Monte Carlo 采样检查设计空间覆盖率；(3) 输出结构化 JSON 报告。未通过校验的先验不应进入正式实验。每条先验记录包含 \texttt{confidence}（置信等级）和 \texttt{evidence}（证据来源）审计字段，确保可追溯性。
+
+\subsection{近似信息价值 (Approximate VOI)}
+\label{sec:voi}
+
+知识梯度 (Knowledge Gradient, KG)\cite{wu2016kg} 的核心思想是偏好"信息价值高"的候选——评估后能最大程度缩减对最优解的不确定性。真正的 KG 需要 one-step lookahead 嵌套优化，计算开销极大。作为轻量近似，我们使用代理模型的后验方差作为信息价值代理：
+
+\begin{equation}
+    \text{VOI}(x) = \text{Var}[f(x) | \mathcal{D}_t] = \sigma_{t}^2(x)
+\end{equation}
+
+高方差区域的评估将最大化后验信息增益，这是 KG 的零阶近似。该项通过 $\lambda_v$ 控制权重，默认关闭（$\lambda_v = 0$）；当开启时，采集函数会更积极地探索模型不确定区域。
+
+
+
+\section{偏好探索子循环 (Preference Exploration Sub-loop)}
+
+标准 HITL-BO 中偏好信息仅从实验后的候选选择中被动获取。受 Lin et al. (2022)\cite{lin2022pebo} 的 PEBO 框架启发，我们引入\textbf{偏好探索 (Preference Exploration, PE)} 子循环：在每轮实物实验之前，以零实验代价主动查询专家偏好。
+
+\subsection{查询对生成策略}
+采用\textbf{不确定性策略}：从离散候选池中选择偏好模型最不确定、且预测偏好差异最小的候选对——即信息量最大的 pair。对每对 $(x_i, x_j)$ 计算信息得分：
+
+\begin{equation}
+    \text{Info}(x_i, x_j) = \text{Var}[u(x_i)] + \text{Var}[u(x_j)] - |{\mathbb{E}[u(x_i)] - \mathbb{E}[u(x_j)]}|
+\end{equation}
+
+得分最高的 $B$ 对（$B$ = \texttt{pe\_budget}，默认 0 表示关闭）依次呈现给专家，每对支持 ``A 优''、``B 优''或``Tie''三种回答。非 tie 回答直接写入偏好模型，PE 结束后触发偏好 GP 重拟合，再进入正式的采集优化。PE 在冷启动时（无偏好模型）退化为随机对选择。
+
+
+
+\section{多样性感知推荐菜单 (Diversity-Aware Recommendation Menu)}
+
+受 Astudillo \& Frazier (2019)\cite{astudillo2019} ``向决策者呈现菜单而非单点''的理念驱动，Top-N 推荐采用贪心子模选择进行多样性重排：
+
+\begin{enumerate}
+    \item 第 1 位：取纯最高采集值候选。
+    \item 后续位：取使 $\hat{\alpha}(x_i) + w_d \cdot \min_{j \in \mathcal{S}} \|x_i - x_j\|_2$ 最大者，其中 $\mathcal{S}$ 为已选集，$w_d$ 为多样性权重（\texttt{--diversity-weight}，默认 0.5）。
+\end{enumerate}
+
+这避免了同质化推荐，使得实验探索更充分覆盖设计空间。$w_d = 0$ 退化为纯分数排序，$w_d$ 增大则强化候选间的空间分散。
+
+
+
+\section{"人类在环"机制及伪代码实现 (Human-in-the-Loop \& KABO Implementation)}
+
+在连续边界寻优得到的连续理想配方点 $x^*_{cont}$ 与读取外部历史离散库得到的候选最佳点 $X^*_{disc}$ 之间，模型未必保证它们对应的物化配置绝对可以在实验室合规组装。\textbf{此时人工干预(Manual Override)与偏好探索作为控制流汇聚核心介入}。
+
+\begin{algorithm}[H]
+\caption{CO$_2$RR Knowledge-Augmented Bayesian Optimization 执行流}
+\label{alg:kabo-bo}
+\begin{algorithmic}[1]
+\REQUIRE 特征边界 $\mathcal{B}$，总迭代数 $T$，初始观测组 $\mathcal{D}_0$，候选数据库 $D_{cand}$
+\REQUIRE KABO 参数：$\lambda_p, \lambda_k, \lambda_v$，PE 预算 $B$，先验配置 $\mathcal{P}$
+\STATE \textbf{Initialize:} 校验 19 维特征。用户选定产物收率 (如 \texttt{Y\_CO}) 及采集策略 (UCB/qNEI)。
+\STATE \textbf{Phase 1 (Feature Selection)} \textit{// 启发式信息压缩}
+\STATE 使用 RF 回归器从 $\mathcal{D}_0$ 对目标组分配权重，排序筛选最显著的 $K$ 项组作 $X_{selected}$。
+\STATE 加载专家先验 $\mathcal{P}$ 并执行 Prior Predictive Check 校验。
+\FOR{$t = 1 \textbf{ to } T$}
+    \STATE \textit{// \textbf{Step 0: Preference Exploration（偏好探索子循环）}}
+    \IF{KABO 模式启用 \textbf{and} $B > 0$}
+        \STATE 从 $D_{cand}$ 生成 $B$ 个最具信息量的候选对 $\{(x_a^{(b)}, x_b^{(b)})\}_{b=1}^B$
+        \FOR{$b = 1$ \textbf{to} $B$}
+            \STATE 向专家展示 $(x_a^{(b)}, x_b^{(b)})$，收集回答 $\in \{A, B, \text{Tie}\}$
+            \IF{非 Tie}
+                \STATE 将 winner/loser 写入偏好模型 $\mathcal{M}_{\text{pref}}$
+            \ENDIF
+        \ENDFOR
+        \STATE 重拟合 $\mathcal{M}_{\text{pref}}$（PairwiseGP Laplace MLL）
+    \ENDIF
+    \STATE \textit{// \textbf{Step 1: 构建 KABO 采集函数}}
+    \STATE $\mathcal{M}_{GP} \leftarrow \text{Fit}(\mathcal{D}_{t-1}, k_{\text{ARD}})$
+    \STATE $\alpha_{\text{base}} \leftarrow$ UCB$(\beta_t)$ 或 qNEI（视策略选择而定）
+    \STATE $\alpha_{\text{KABO}} \leftarrow z(\alpha_{\text{base}}) + \lambda_p z(\text{Pref}_{\text{MC}}) + \lambda_k z(\text{Prior}) + \lambda_v z(\text{VOI})$
+    \STATE \textit{// \textbf{Step 2: 候选优化与多样性推荐}}
+    \STATE $x_{cont} \leftarrow \arg\max_{x \in [0,1]^K} \alpha_{\text{KABO}}(x)$
+    \STATE 评估离散候选 $\hat{Y}_{disc} \leftarrow \text{Evaluate}(D_{cand}, \alpha_{\text{KABO}})$
+    \STATE 按多样性重排推举 Top-N 菜单（贪心子模选取）
+    \STATE \textit{// \textbf{Step 3: Human Review}}
+    \IF{专家选择 \texttt{tie}}
+        \STATE $x_{final} \leftarrow$ Rank \#1（自动选取），跳过偏好记录
+    \ELSIF{专家选择 \texttt{manual override}}
+        \STATE $x_{final} \leftarrow x_{manual}$，将 $(x_{manual} \succ \text{all Top-N})$ 写入 $\mathcal{M}_{\text{pref}}$
+    \ELSE
+        \STATE $x_{final} \leftarrow x_{chosen}$，将 $(x_{chosen} \succ \text{unchosen})$ 写入 $\mathcal{M}_{\text{pref}}$
+    \ENDIF
+    \STATE \textbf{Laboratory Execution}: 制备并运行实验，获取多产物收率 $\mathbf{Y}_{all}$。
+    \STATE \textbf{Update}: $\mathcal{D}_t \leftarrow \mathcal{D}_{t-1} \cup (x_{final}, \mathbf{Y}_{all})$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{实验可追溯性与参数审计 (Traceability \& Parameter Auditing)}
+
+为保证实验结果的完全可复现，系统在每次运行结束后将所有超参数与配置写入结构化元数据文件 (\texttt{run\_metadata.json})，包括但不限于：
+
+\begin{itemize}
+    \item 基础参数：\texttt{seed}、\texttt{beta\_schedule}、\texttt{beta\_trace}、\texttt{acq\_strategy}
+    \item KABO 参数：\texttt{kabo\_mode}、\texttt{lambda\_p}、\texttt{lambda\_k}、\texttt{lambda\_v}
+    \item 交互参数：\texttt{diversity\_weight}、\texttt{pe\_budget}、\texttt{tie\_count}
+    \item 先验参数：\texttt{expert\_prior\_file}（含版本追溯）
+    \item 特征选择：\texttt{selected\_features}（实际使用的 $K$ 个描述符）
+\end{itemize}
+
+所有参数均在优化器初始化阶段执行严格防呆校验（有限性、非负性、类型检查），异常值在运行前即被拦截。
+
+
+\section{结语}
+
+本报告构建了从特征解耦裁剪、带 ARD 核物理感知映射的高斯代理，到知识增强贝叶斯优化闭环的完整系统。相较于初始的 HITL-BO 框架，KABO 在四个方面实现了质的提升：(1) 通过 PairwiseGP 偏好学习与 MC 积分将专家交互选择转化为持久化的效用模型；(2) 通过 JSON 参数化先验编码与 Prior Predictive Check 使领域知识的注入可审计、可校验；(3) 通过偏好探索子循环以零实验代价主动增强偏好模型质量；(4) 通过近似 VOI 项引导探索高信息价值区域。四项复合采集函数经在线 z-score 标定后协同工作，在 CO$_2$RR 等不确定大搜索面下兼顾了开发、探索、偏好与知识价值四重目标，使得实验加速寻优与专家知识沉淀得以兼备。该架构将在多成分催化体系和高通量实验室合成间成为有力的驱动支点。
+
+\newpage
+\begin{thebibliography}{99}
+
+\bibitem{gpucb2026}
+Ding et al., \textit{Efficient and Principled Scientific Discovery through Bayesian Optimization: A Tutorial}. arXiv:2604.01328v3.
+
+\bibitem{cbo2017}
+Letham et al., \textit{Constrained Bayesian Optimization with Noisy Experiments}. arXiv:1706.07094v2.
+
+\bibitem{botorch2019}
+Balandat et al., \textit{BoTorch: A Framework for Efficient Monte-Carlo Bayesian Optimization}. arXiv:1910.06403v3.
+
+\bibitem{turbo2019}
+Wang et al., \textit{Scalable Global Optimization via Local Bayesian Optimization}. arXiv:1910.01739v4.
+
+\bibitem{bo2012}
+Snoek et al., \textit{Practical Bayesian Optimization of Machine Learning Algorithms}. arXiv:1206.2944v2.
+
+\bibitem{catbox2025}
+Li et al., \textit{CatBOX: A Categorical-Continuous Bayesian Optimization with Spectral Mixture Kernels for Accelerated Catalysis Experiments}. arXiv:2505.17393v2.
+
+\bibitem{jacs2024}
+Author et al., \textit{Multivariate Bayesian Optimization of CoO Nanoparticles for CO2 Hydrogenation Catalysis}. Journal of the American Chemical Society (2024), DOI: 10.1021/jacs.4c03789.
+
+\bibitem{nature2025}
+Author et al., \textit{Identifying a highly efficient molecular photocatalytic CO2 reduction system via descriptor-based high-throughput screening}. Nature Catalysis (2025), DOI: 10.1038/s41929-025-01291-z.
+
+\bibitem{astudillo2019}
+Astudillo \& Frazier, \textit{Multi-Attribute Bayesian Optimization under Utility Uncertainty}. arXiv:1911.05934.
+
+\bibitem{wu2016kg}
+Wu \& Frazier, \textit{The Parallel Knowledge Gradient Method for Batch Bayesian Optimization}. arXiv:1606.04414.
+
+\bibitem{li2020prior}
+Li et al., \textit{Incorporating Expert Prior in Bayesian Optimisation via Space Warping}. arXiv:2002.11256.
+
+\bibitem{lin2022pebo}
+Lin et al., \textit{Preference Exploration for Efficient Bayesian Optimization with Multiple Outcomes}. arXiv:2203.11382.
+
+\bibitem{mikkola2021prior}
+Mikkola et al., \textit{Prior Knowledge Elicitation: The Past, Present, and Future}. arXiv:2112.01380.
+
+\end{thebibliography}
+
+\end{document}

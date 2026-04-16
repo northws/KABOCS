@@ -18,9 +18,9 @@ build/
 venv/
 env/
 .conda/
-reference/
+
 # ========================================
-# IDE / Editor
+# IDE / Editor / Linter Cache
 # ========================================
 .vscode/
 .idea/
@@ -28,6 +28,7 @@ reference/
 *.swo
 *~
 .DS_Store
+.ruff_cache/
 
 # ========================================
 # Jupyter Notebook
@@ -38,18 +39,12 @@ reference/
 # Output (generated at runtime)
 # ========================================
 output/
-feature_importances.png
-data_updated.csv
 
 # ========================================
-# Legacy single-file version
+# Legacy / Deprecated
 # ========================================
 co2rr_optimizer.py
-
-# ========================================
-# arXiv paper source (optional, large)
-# ========================================
-arXiv-2604.01328v3/
+reference/
 
 # ========================================
 # TeX / LaTeX build artifacts
@@ -66,3 +61,8 @@ arXiv-2604.01328v3/
 *.bbl
 *.blg
 *.run.xml
+
+# ========================================
+# arXiv paper source (optional, large)
+# ========================================
+papers/
