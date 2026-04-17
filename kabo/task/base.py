@@ -161,6 +161,86 @@ class TaskBase(ABC):
         """
         return json_obj
 
+    # -------------------------------------------------------------------------
+    #  Feature type declarations (P0 of discrete variables proposal)
+    #
+    #  These three methods let a Task declare which of its features are
+    #  integer-valued, categorical, ordinal, or continuous.  The Engine
+    #  (KABOEngine) consumes this metadata to:
+    #
+    #      * route categorical dims to ``MixedSingleTaskGP.cat_dims``
+    #      * pass integer dims to ``optimize_acqf(integer_indices=...)``
+    #      * optionally enumerate categorical combinations
+    #
+    #  Default implementations preserve current behaviour: every feature
+    #  is treated as continuous, no categorical values are declared, no
+    #  dynamic candidate pool is generated.  Legacy Tasks therefore
+    #  continue to work unchanged.
+    # -------------------------------------------------------------------------
+    def feature_types(self) -> dict[str, str]:
+        """Feature-type declarations.
+
+        Returns a mapping ``feature_name -> type_label`` where
+        ``type_label`` is one of:
+
+        * ``"continuous"`` — real-valued (default).
+        * ``"integer"``    — integer-valued within ``design_space_bounds``.
+        * ``"categorical"`` — unordered finite set (must declare values
+          in :meth:`categorical_values`).
+        * ``"ordinal"``    — ordered finite set (must declare values in
+          :meth:`categorical_values`; order carries meaning).
+
+        Unspecified features default to ``"continuous"``; Engine code
+        should therefore use ``self.feature_types().get(name, "continuous")``
+        when routing dimensions.
+
+        Default implementation returns every declared feature as
+        ``"continuous"``.
+        """
+        return {f: "continuous" for f in self.feature_columns()}
+
+    def categorical_values(self) -> dict[str, list]:
+        """Allowed values for categorical / ordinal features.
+
+        Returns a mapping ``feature_name -> [value_1, value_2, ...]``.
+        For features declared as ``"categorical"`` or ``"ordinal"`` in
+        :meth:`feature_types`, this mapping is **required**.  For all
+        other features it is ignored.
+
+        The order of the list is used as the internal integer encoding
+        when building GP inputs.  For ``"ordinal"`` features, the order
+        is semantically meaningful (smaller index → smaller rank).
+
+        Default implementation returns an empty dict (no categorical
+        values).
+        """
+        return {}
+
+    def generate_candidates(
+        self,
+        n: int = 1000,
+        seed: int = 0,
+    ) -> Optional[pd.DataFrame]:
+        """Optional dynamic candidate-pool generator (P2 of the discrete
+        variables proposal).
+
+        When implemented, this hook replaces the static CSV candidates
+        file.  Concrete Tasks may e.g. enumerate the Cartesian product
+        of ``categorical_values()`` while Sobol-sampling continuous and
+        integer features within their design-space bounds.
+
+        Returns
+        -------
+        pandas.DataFrame or None
+            DataFrame with columns covering :meth:`feature_columns` and
+            values within :meth:`design_space_bounds`, or ``None`` if
+            this Task prefers to rely on a pre-materialised
+            ``candidates.csv``.
+
+        Default implementation returns ``None`` (no dynamic generation).
+        """
+        return None
+
     @abstractmethod
     def prompt_observation(
         self,

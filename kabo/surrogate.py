@@ -28,10 +28,19 @@ from gpytorch.kernels import MaternKernel, ScaleKernel, SpectralMixtureKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from kabo.utils import (
+    categorical_indices_from_types,
     get_logger,
+    integer_indices_from_types,
     normalize_x,
     standardize_y,
 )
+
+try:
+    from botorch.models import MixedSingleTaskGP
+    _HAS_MIXED_GP = True
+except ImportError:  # pragma: no cover — BoTorch too old
+    MixedSingleTaskGP = None  # type: ignore
+    _HAS_MIXED_GP = False
 
 logger = get_logger(__name__)
 
@@ -78,6 +87,11 @@ class SurrogateModel:
         self.bounds_raw: Optional[torch.Tensor] = None
         self.y_mean: float = 0.0
         self.y_std: float = 1.0
+        # P1 of discrete variables proposal: type-aware dim routing.
+        # Populated by fit(); consumed by suggest_continuous / evaluate_discrete.
+        self.integer_indices: list[int] = []
+        self.categorical_indices: list[int] = []
+        self.feature_types: Optional[dict[str, str]] = None
 
     def fit(
         self,
@@ -86,6 +100,7 @@ class SurrogateModel:
         selected_features: list[str],
         design_bounds: dict[str, tuple[float, float]],
         kernel_type: str = "matern",
+        feature_types: Optional[dict[str, str]] = None,
     ) -> SingleTaskGP:
         """Build and fit the GP surrogate model.
 
@@ -108,6 +123,14 @@ class SurrogateModel:
             e.g. ``{"A_pI": (2.7, 10.8), ...}``.
         kernel_type : str, optional
             Type of kernel to use ("matern" or "spectral_mixture"), default "matern".
+        feature_types : dict[str, str] or None, optional
+            Per-feature type labels from ``TaskBase.feature_types()``.
+            When the mapping contains ``"categorical"`` or ``"ordinal"``
+            labels, the surrogate switches to ``MixedSingleTaskGP`` with
+            ``cat_dims`` routed automatically.  ``"integer"`` labels are
+            stored for acquisition-time grid snapping (see
+            :func:`kabo.utils.round_integer_dims_to_grid`).  ``None`` (the
+            default) preserves legacy behaviour (all continuous).
 
         Returns
         -------
@@ -116,6 +139,29 @@ class SurrogateModel:
         """
         K = X_raw.shape[1]
         logger.info("Building GP with K=%d selected features", K)
+
+        # ----- Type metadata routing (P1) -----
+        self.feature_types = feature_types
+        self.integer_indices = integer_indices_from_types(
+            selected_features, feature_types,
+        )
+        self.categorical_indices = categorical_indices_from_types(
+            selected_features, feature_types,
+        )
+        if self.integer_indices or self.categorical_indices:
+            logger.info(
+                "Feature types: %d integer dim(s), %d categorical dim(s), "
+                "%d continuous dim(s).",
+                len(self.integer_indices),
+                len(self.categorical_indices),
+                K - len(self.integer_indices) - len(self.categorical_indices),
+            )
+            if self.integer_indices:
+                int_names = [selected_features[i] for i in self.integer_indices]
+                logger.info("  Integer dims: %s", int_names)
+            if self.categorical_indices:
+                cat_names = [selected_features[i] for i in self.categorical_indices]
+                logger.info("  Categorical dims: %s", cat_names)
 
         # ----- 1. Compute normalization bounds from design space -----
         x_min = np.array([design_bounds[f][0] for f in selected_features])
@@ -163,26 +209,53 @@ class SurrogateModel:
             logger.info("  %-35s  [%.4f, %.4f]", feat, lo, hi)
 
         # ----- 3. Define the GP model -----
-        if kernel_type == "matern":
-            covar_module = ScaleKernel(
-                MaternKernel(nu=2.5, ard_num_dims=K)
+        # Route to MixedSingleTaskGP when Task declared categorical dims.
+        use_mixed = bool(self.categorical_indices) and _HAS_MIXED_GP
+
+        if use_mixed:
+            if kernel_type != "matern":
+                logger.warning(
+                    "MixedSingleTaskGP ignores kernel_type='%s' for its "
+                    "continuous factor; using BoTorch defaults.",
+                    kernel_type,
+                )
+            self.model = MixedSingleTaskGP(
+                train_X=self.train_X,
+                train_Y=self.train_Y,
+                cat_dims=list(self.categorical_indices),
+            ).to(self.device)
+            logger.info(
+                "Using MixedSingleTaskGP (cat_dims=%s, %d continuous dim(s)).",
+                self.categorical_indices,
+                K - len(self.categorical_indices),
             )
-        elif kernel_type == "spectral_mixture":
-            logger.info("Using SpectralMixtureKernel (derived from CatBOX / catalysis literature).")
-            # 4 mixtures is a reasonable default for standard datasets
-            covar_module = SpectralMixtureKernel(num_mixtures=4, ard_num_dims=K)
         else:
-            raise ValueError(f"Unknown kernel_type '{kernel_type}'. Choose 'matern' or 'spectral_mixture'.")
+            if self.categorical_indices and not _HAS_MIXED_GP:
+                logger.warning(
+                    "MixedSingleTaskGP unavailable in this BoTorch build — "
+                    "falling back to SingleTaskGP; categorical dims will be "
+                    "treated as continuous (less accurate).",
+                )
+            if kernel_type == "matern":
+                covar_module = ScaleKernel(
+                    MaternKernel(nu=2.5, ard_num_dims=K)
+                )
+            elif kernel_type == "spectral_mixture":
+                logger.info("Using SpectralMixtureKernel (derived from CatBOX / catalysis literature).")
+                # 4 mixtures is a reasonable default for standard datasets
+                covar_module = SpectralMixtureKernel(num_mixtures=4, ard_num_dims=K)
+            else:
+                raise ValueError(f"Unknown kernel_type '{kernel_type}'. Choose 'matern' or 'spectral_mixture'.")
 
-        self.model = SingleTaskGP(
-            train_X=self.train_X,
-            train_Y=self.train_Y,
-            covar_module=covar_module,
-        ).to(self.device)
+            self.model = SingleTaskGP(
+                train_X=self.train_X,
+                train_Y=self.train_Y,
+                covar_module=covar_module,
+            ).to(self.device)
 
-        # For SpectralMixtureKernel, we must initialize parameters from data
-        if kernel_type == "spectral_mixture":
-            covar_module.initialize_from_data(self.train_X, self.train_Y)
+            # For SpectralMixtureKernel, we must initialize parameters from data
+            if kernel_type == "spectral_mixture":
+                covar_module.initialize_from_data(self.train_X, self.train_Y)
 
         # ----- 4. Fit hyperparameters -----
         self.mll = ExactMarginalLogLikelihood(

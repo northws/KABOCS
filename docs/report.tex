@@ -49,7 +49,7 @@
 \maketitle
 
 \begin{abstract}
-仿酶催化体系（CO$_2$RR、OER、NRR、ORR 等）的实验寻优长期面临高维设计空间、昂贵实验成本和领域知识难以结构化注入三重障碍。本文提出并实现了一种\textbf{任务解耦的知识增强贝叶斯优化框架}（Task-decoupled Knowledge-Augmented Bayesian Optimization, KABO），将纯数学优化能力封装为与体系无关的 \texttt{KABOEngine}，将体系相关逻辑抽象为统一的 \texttt{TaskBase} 接口。算法核心整合了偏好学习（Preference Learning）、专家先验编码（Expert Prior Encoding）、偏好探索子循环（Preference Exploration）与近似信息价值（Approximate VOI）四项知识内化机制，通过 z-score 标定的复合采集函数协同驱动候选选择。任务层以一个体系一个文件的形式组织（\texttt{kabo/task/*.py}），已内置光催化 CO$_2$ 还原任务（\texttt{CO2RRTask}，19 描述符 / 7 产物）与最小综合任务（\texttt{TestTask}，3 描述符 / 1 产物）。新增体系（OER 等）仅需新增一个约 50 行的 Task 类，Engine、Optimizer 与 CLI 零改动。本文以 CO$_2$RR 为主体案例，详述了架构分层、数学重构、KABO 四项机制、偏好探索子循环与人类在环闭环；并通过 TestTask 的端到端冒烟测试印证 Engine 的体系无关性。
+仿酶催化体系（CO$_2$RR、OER、NRR、ORR 等）的实验寻优长期面临高维设计空间、昂贵实验成本和领域知识难以结构化注入三重障碍。本文提出并实现了一种\textbf{任务解耦的知识增强贝叶斯优化框架}（Task-decoupled Knowledge-Augmented Bayesian Optimization, KABO），将纯数学优化能力封装为与体系无关的 \texttt{KABOEngine}，将体系相关逻辑抽象为统一的 \texttt{TaskBase} 接口。算法核心整合了偏好学习（Preference Learning）、专家先验编码（Expert Prior Encoding）、偏好探索子循环（Preference Exploration）与近似信息价值（Approximate VOI）四项知识内化机制，通过 z-score 标定的复合采集函数协同驱动候选选择。为贴合真实催化体系中"连续-整数-类别"共存的描述符现实，进一步实现了\textbf{混合离散-连续搜索空间支持}：Task 层通过 \texttt{feature\_types()} 契约声明维度类型，算法层以整数 Round-trick、\texttt{MixedSingleTaskGP} 混合核与 Thompson 离散策略三位一体实现类型感知的代理建模与采集优化。任务层以一个体系一个文件的形式组织（\texttt{kabo/task/*.py}），已内置光催化 CO$_2$ 还原任务（\texttt{CO2RRTask}，19 描述符 / 7 产物，其中 6 维为整数氢键计数）与最小综合任务（\texttt{TestTask}，3 描述符 / 1 产物）。新增体系（OER 等）仅需新增一个约 50 行的 Task 类，Engine、Optimizer 与 CLI 零改动。本文以 CO$_2$RR 为主体案例，详述了架构分层、数学重构、KABO 四项机制、混合空间处理、偏好探索子循环与人类在环闭环；并通过 TestTask 的端到端冒烟测试印证 Engine 的体系无关性。
 
 \textbf{关键词}：贝叶斯优化；高斯过程；知识增强；偏好学习；任务解耦架构；光催化；CO$_2$ 还原
 \end{abstract}
@@ -269,6 +269,108 @@ BoTorch 引擎底层的带噪期望提升（\texttt{qNoisyExpectedImprovement}�
 \end{equation}
 
 使用 128 采样数（可调）的 \texttt{SobolQMCNormalSampler} 做 Quasi-Monte Carlo 无偏估计\cite{botorch2019}。qNEI 对高噪声场景比 UCB 更稳健。
+
+
+\section{混合离散-连续搜索空间支持}
+\label{sec:mixed-space}
+
+\subsection{动机：催化描述符并非全连续}
+
+仿酶催化的真实描述符空间并非纯连续：氨基酸 / 溶剂的氢键供受体数天然为整数计数 ($0, 1, \ldots, 6$)，溶剂身份、金属中心、氨基酸种类则是无序类别变量；若一律按连续变量处理，代理 GP 会在整数维上做连续插值、采集优化可能推荐 $A\_{hbond\_donors} = 2.34$ 这类在实验室不可实现的配方\cite{garrido2020round}。本节在保持向后兼容的前提下，通过\textbf{任务层类型声明 $\rightarrow$ 算法层分派}的最小侵入设计实现了混合空间支持，核心改动集中在 \texttt{kabo/task/base.py}、\texttt{kabo/surrogate.py}、\texttt{kabo/acquisition.py}、\texttt{kabo/engine.py} 四个文件。
+
+\subsection{变量类型谱系}
+
+为避免"一刀切"的次优处理，将催化描述符划分为五类，并为每一类配置合适的数学策略：
+
+\begin{itemize}
+    \item \textbf{连续}（温度、电位、浓度）$\to$ ARD Mat\'{e}rn GP（沿用 §4 方案）
+    \item \textbf{整数}（氢键供受体数、配位数、碳链长度 $n$）$\to$ 归一化网格 Round-trick
+    \item \textbf{类别无序}（溶剂身份、金属中心、氨基酸）$\to$ \texttt{MixedSingleTaskGP} 的 Hamming 核\cite{ru2020cocabo}
+    \item \textbf{类别有序}（粒径等级、结晶度档）$\to$ Ordinal 核 / 单调 warp（预留）
+    \item \textbf{离散数值}（预定浓度档位）$\to$ \texttt{fixed\_features\_list} 枚举（预留）
+\end{itemize}
+
+CO$_2$RR 的 19 描述符中 6 维为整数（氨基酸 A / B / 溶剂各 2 个氢键计数），13 维为连续；氨基酸身份目前以连续描述符（pI、距离）间接编码，留作 P4 的化学嵌入扩展方向。
+
+\subsection{任务层类型声明契约}
+
+\texttt{TaskBase} 新增两个可选方法形成"类型契约"，默认实现保持全连续行为从而不破坏历史 Task：
+
+\begin{itemize}
+    \item \texttt{feature\_types()} $\rightarrow$ \texttt{\{feature\_name: "continuous" | "integer" | "categorical" | "ordinal"\}} 字典
+    \item \texttt{categorical\_values()} $\rightarrow$ 类别变量的合法取值列表
+\end{itemize}
+
+\texttt{CO2RRTask} 覆写 \texttt{feature\_types()}，显式标注 6 个 \texttt{*\_hbond\_acceptors / donors} 为 \texttt{integer}。此举使\textbf{"氢键计数是整数"这一体系知识归属 Task 层}，Engine 仅按类型字符串分派，保持"零体系关键词"原则不变。
+
+\subsection{整数变量：归一化网格 Round-trick}
+
+依 Garrido-Merch\'{a}n \& Hern\'{a}ndez-Lobato\cite{garrido2020round} 的 "round within GP" 策略，整数维在归一化 $[0, 1]^K$ 空间上\textbf{仍做连续优化}，但优化完成后 snap 到合法整数网格。设整数维 $k$ 的原始边界为 $(l_k, h_k)$，其归一化合法网格为
+\begin{equation}
+    \mathcal{G}_k = \{0, 1/n_k, 2/n_k, \ldots, 1\}, \quad n_k = h_k - l_k
+\end{equation}
+对最优候选 $x^*_k$ 执行
+\begin{equation}
+    x^*_k \leftarrow \frac{1}{n_k} \cdot \mathrm{round}(n_k \cdot x^*_k), \quad x^*_k \in [0, 1]
+\end{equation}
+然后在 snap 后的点上\textbf{重算采集值}，确保与离散候选池按同一尺度 apples-to-apples 排序。实现上封装为 \texttt{kabo.utils.round\_integer\_\brk dims\_\brk to\_\brk grid}，由 \texttt{optimize\_continuous} 通过 \texttt{integer\_indices} 参数驱动。
+
+\subsection{类别变量：MixedSingleTaskGP 与 Hamming 核}
+
+当 \texttt{feature\_types()} 包含任一 \texttt{"categorical"} 或 \texttt{"ordinal"} 标签时，\texttt{SurrogateModel} 自动切换到 BoTorch \texttt{MixedSingleTaskGP}\cite{ru2020cocabo}：
+\begin{equation}
+    k_{\text{mix}}(x, x') = k_{\text{Mat\'{e}rn}}\bigl(x^{\text{cont}}, x'^{\text{cont}}\bigr) \cdot k_{\text{cat}}\bigl(x^{\text{cat}}, x'^{\text{cat}}\bigr)
+\end{equation}
+其中 $k_{\text{cat}}$ 为 Hamming 核的连续松弛 \texttt{CategoricalKernel}。由于当前 CO$_2$RR 未声明 \texttt{categorical} 维度，此路径处于待激活状态；当老 BoTorch 版本不支持 \texttt{MixedSingleTaskGP} 时，\texttt{SurrogateModel.fit} 优雅降级为 \texttt{SingleTaskGP} 并打印告警（仅影响未来可能的类别化 Task）。
+
+\subsection{动态候选池生成}
+
+\texttt{TaskBase} 新增可选 Hook \texttt{generate\_candidates(n, seed)}：若 Task 实现之，orchestrator 在 Phase 3 入口\textbf{优先使用动态生成器替代静态 \texttt{candidates.csv}}。\texttt{CO2RRTask.generate\_candidates} 的实现：
+\begin{itemize}
+    \item 连续维：\texttt{torch.quasirandom.SobolEngine}（准随机序列，空间覆盖优于均匀 i.i.d.）
+    \item 整数维：\texttt{numpy.random.Generator.integers}（在 $[l_k, h_k]$ 内均匀随机整数）
+    \item 默认 $n = 1000$，由 \texttt{-{}-generate-candidates-n} 控制
+\end{itemize}
+
+回退机制三重冗余：(1) Task 未实现生成器 $\to$ 回退 CSV；(2) 生成抛异常 $\to$ 回退 CSV；(3) 用户显式 \texttt{-{}-prefer-file-candidates} $\to$ 强制 CSV（复现旧实验、无入侵修改）。
+
+\subsection{Thompson 离散策略}
+
+当候选池规模达到数千时，对每个候选重复计算采集函数代价昂贵，且 UCB 值差异可能集中在局部导致 Top-N 推荐同质化。新增 \texttt{-{}-discrete-strategy thompson} 采用 Thompson Sampling\cite{kandasamy2018parallel}：从 GP 后验独立抽 $4q$ 个样本，每个样本上取候选池 argmax 作为 $q$ 之一，去重后截至 $q$ 个。
+\begin{equation}
+    x^{(j)} = \arg\max_{x \in D_{\text{cand}}} f^{(j)}(x), \quad f^{(j)} \sim p\bigl(f \mid \mathcal{D}_t\bigr), \quad j = 1, \ldots, 4q
+\end{equation}
+此举在 $O(|D_{\text{cand}}| \cdot q)$ GP forward 代价下实现\textbf{天然探索多样性}，无需额外 diversity regularizer（§8 的贪心子模多样性仅在 \texttt{acq} 策略下启用）。失败回退：抽样异常则退化为按后验均值排序 Top-N。
+
+\subsection{架构合规性与体系无关性校验}
+
+所有改动严格遵循"算法层零体系常量"原则：
+\begin{itemize}
+    \item \texttt{kabo/utils.py} 新增 \texttt{round\_integer\_dims\_to\_grid} / \texttt{integer\_indices\_from\_types} / \texttt{categorical\_indices\_from\_types}，\textbf{仅接受 tensor 与索引 list}
+    \item \texttt{kabo/surrogate.py::SurrogateModel.fit} 按 \texttt{feature\_types} 字典分派，不硬编码 "hbond" 等词
+    \item \texttt{kabo/acquisition.py::optimize\_continuous} 新增 \texttt{integer\_indices} 纯索引参数
+    \item \texttt{kabo/engine.py::KABOEngine} 新增 \texttt{discrete\_strategy} 字符串开关
+\end{itemize}
+
+对 \texttt{kabo/engine.py}、\texttt{kabo/acquisition.py}、\texttt{kabo/surrogate.py} 三个算法层文件执行 \texttt{grep "hbond\textbar{}CO2\textbar{}pI"} 扫描均无匹配，合规性通过静态校验。
+
+\subsection{端到端验证}
+
+在五种配置组合下端到端回归全部通过：
+\begin{enumerate}
+    \item CO$_2$RR 默认（Sobol 生成 + \texttt{acq}）
+    \item CO$_2$RR Sobol 生成 + \texttt{thompson}
+    \item CO$_2$RR \texttt{-{}-prefer-file-candidates}（legacy CSV + \texttt{acq}）
+    \item TestTask（纯连续，CSV 回退路径，向后兼容性基线）
+    \item CO$_2$RR KABO mode + 2 iterations（端到端含专家先验与偏好学习）
+\end{enumerate}
+
+代表性证据：
+\begin{itemize}
+    \item CO$_2$RR 所有推荐配方中 6 个氢键维均为整数（如 \texttt{A\_\brk hbond\_\brk acceptors = 3.0000}、\texttt{B\_\brk hbond\_\brk donors = 2.0000}），连续维仍为 Sobol 浮点（如 \texttt{A\_\brk pI = 3.4407}）
+    \item TestTask 未声明整数维 $\to$ UCB 值 2.0227 与实施前逐字节一致，向后兼容零回归
+    \item Thompson 策略日志 "drew 20 samples, returned 5 unique picks"，多样性可审计
+\end{itemize}
 
 
 \section{知识增强贝叶斯优化 (KABO)}
@@ -498,7 +600,8 @@ python -m kabo --task test --data data/test_data.csv --candidates none \
     \item \textbf{KABO 参数}：\texttt{kabo\_mode}、\texttt{lambda\_p}、\texttt{lambda\_k}、\texttt{lambda\_v}
     \item \textbf{交互参数}：\texttt{diversity\_weight}、\texttt{pe\_budget}、\texttt{tie\_count}
     \item \textbf{先验参数}：\texttt{expert\_prior\_file}（含版本追溯）
-    \item \textbf{任务参数}：\texttt{task}（记录 \texttt{task\_name()}）、\texttt{selected\_features}（实际使用的 $K$ 个描述符）
+    \item \textbf{任务参数}：\texttt{task}（记录 \texttt{task\_name()}）、\texttt{selected\_features}（实际使用的 $K$ 个描述符）、\texttt{feature\_types}（完整的维度类型声明，见 §\ref{sec:mixed-space}）
+    \item \textbf{混合空间参数}（§\ref{sec:mixed-space}）：\texttt{discrete\_strategy}（\texttt{acq} / \texttt{thompson}）、\texttt{generate\_candidates\_n}（动态候选池规模）、\texttt{prefer\_file\_candidates}（是否强制 CSV）
 \end{itemize}
 
 所有参数均在优化器初始化阶段执行严格防呆校验（有限性、非负性、类型检查），异常值在运行前即被拦截。
@@ -520,8 +623,9 @@ python -m kabo --task test --data data/test_data.csv --candidates none \
 
 \begin{itemize}
     \item \textbf{多目标 Pareto 前沿}：目前 Task 返回标量训练目标，未来可扩展 \texttt{build\_training\_targets()} 返回向量以支持 multi-objective qEHVI\cite{botorch2019}
-    \item \textbf{异构特征类型}：当前 GP 仅处理连续特征，离散类别特征（如"溶剂种类"）可通过 Wang et al. CatBOX 框架\cite{catbox2025} 的谱混合核扩展
+    \item \textbf{异构特征类型（部分已实现，见 §\ref{sec:mixed-space}）}：\texttt{TaskBase.feature\_types()} 契约已支持连续、整数、类别、序数四类声明；\texttt{SurrogateModel} 对类别维自动切换 \texttt{MixedSingleTaskGP}\cite{ru2020cocabo}，对整数维应用 Round-trick\cite{garrido2020round}。下一步可将氨基酸 / 溶剂从连续描述符代理升级为显式类别，并配合 ESM2 / AAindex 化学嵌入作为类别先验核\cite{catbox2025}
     \item \textbf{更深的先验注入}：Mikkola et al.\cite{mikkola2021prior} 的先验启发方法可与 JSON 先验编码融合，支持领域专家以自然语言描述先验
+    \item \textbf{高维 TuRBO 信任域}：当 OER 等任务的描述符维度 $d > 30$ 时引入 TuRBO\cite{turbo2019} 信任域切换，避免全局 GP 在高维下的病态拟合
 \end{itemize}
 
 
@@ -570,6 +674,15 @@ Lin et al., \textit{Preference Exploration for Efficient Bayesian Optimization w
 
 \bibitem{mikkola2021prior}
 Mikkola et al., \textit{Prior Knowledge Elicitation: The Past, Present, and Future}. arXiv:2112.01380.
+
+\bibitem{garrido2020round}
+Garrido-Merch\'{a}n E C \& Hern\'{a}ndez-Lobato D, \textit{Dealing with Categorical and Integer-valued Variables in Bayesian Optimization with Gaussian Processes}. Neurocomputing 380 (2020) 20--35. arXiv:1805.03463.
+
+\bibitem{ru2020cocabo}
+Ru B, Alvi A, Nguyen V, Osborne M A, Roberts S J, \textit{Bayesian Optimisation over Multiple Continuous and Categorical Inputs}. ICML 2020. arXiv:1906.08878.
+
+\bibitem{kandasamy2018parallel}
+Kandasamy K, Krishnamurthy A, Schneider J, P\'{o}czos B, \textit{Parallelised Bayesian Optimisation via Thompson Sampling}. AISTATS 2018. arXiv:1705.09236.
 
 \end{thebibliography}
 

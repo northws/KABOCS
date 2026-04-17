@@ -60,6 +60,97 @@ class CO2RRTask(TaskBase):
     def product_names(self) -> dict[str, str]:
         return dict(PRODUCT_NAMES)
 
+    # -------------------------------------------------------------------------
+    #  Feature-type declarations (P0 of discrete variables proposal)
+    #
+    #  CO2RR has 6 integer-valued descriptors (hydrogen-bond counts) that
+    #  must not be interpolated by the continuous GP / acquisition:
+    #
+    #      * A_hbond_acceptors, A_hbond_donors   (amino acid A, counts)
+    #      * B_hbond_acceptors, B_hbond_donors   (amino acid B, counts)
+    #      * Solvent_hbond_acceptors, Solvent_hbond_donors
+    #
+    #  The remaining 13 descriptors (pI, distances, binding energies,
+    #  wavelengths, potentials, dielectrics, concentrations) are
+    #  continuous.  Amino acid / solvent identity is currently encoded
+    #  indirectly via these continuous descriptors; lifting them to
+    #  categorical variables is left for P4 (chemical embeddings).
+    # -------------------------------------------------------------------------
+    _INTEGER_FEATURES: frozenset[str] = frozenset({
+        "A_hbond_acceptors",
+        "A_hbond_donors",
+        "B_hbond_acceptors",
+        "B_hbond_donors",
+        "Solvent_hbond_acceptors",
+        "Solvent_hbond_donors",
+    })
+
+    def feature_types(self) -> dict[str, str]:
+        return {
+            f: ("integer" if f in self._INTEGER_FEATURES else "continuous")
+            for f in self.feature_columns()
+        }
+
+    # -------------------------------------------------------------------------
+    #  Dynamic candidate pool (P2 of discrete variables proposal)
+    #
+    #  Generates ``n`` synthetic candidate recipes inside the declared
+    #  design-space bounds.  Continuous dims use a Sobol sequence (better
+    #  space-filling than uniform i.i.d.); integer dims use uniform random
+    #  integers between their ``(lo, hi)`` bounds.  Values are laid out in
+    #  the canonical ``feature_columns()`` order so downstream validation
+    #  and scoring can treat this frame like ``candidates.csv``.
+    # -------------------------------------------------------------------------
+    def generate_candidates(
+        self,
+        n: int = 1000,
+        seed: int = 0,
+    ) -> pd.DataFrame:
+        from torch.quasirandom import SobolEngine
+
+        feature_columns = self.feature_columns()
+        bounds = self.design_space_bounds()
+        types = self.feature_types()
+
+        cont_features = [f for f in feature_columns if types[f] == "continuous"]
+        int_features = [f for f in feature_columns if types[f] == "integer"]
+
+        rng = np.random.default_rng(seed)
+
+        # ---- Continuous dims via Sobol (quasi-random, better coverage) ----
+        K_cont = len(cont_features)
+        cont_vals: dict[str, np.ndarray] = {}
+        if K_cont > 0:
+            sobol = SobolEngine(dimension=K_cont, scramble=True, seed=seed)
+            U = sobol.draw(n).numpy()
+            for j, f in enumerate(cont_features):
+                lo, hi = bounds[f]
+                cont_vals[f] = U[:, j] * (hi - lo) + lo
+
+        # ---- Integer dims via uniform random ints ----
+        int_vals: dict[str, np.ndarray] = {}
+        for f in int_features:
+            lo, hi = bounds[f]
+            int_vals[f] = rng.integers(
+                low=int(round(lo)), high=int(round(hi)) + 1, size=n,
+            ).astype(np.float64)
+
+        # ---- Assemble DataFrame in canonical column order ----
+        data: dict[str, np.ndarray] = {}
+        for f in feature_columns:
+            if types[f] == "integer":
+                data[f] = int_vals[f]
+            else:
+                data[f] = cont_vals[f]
+
+        df = pd.DataFrame(data, columns=feature_columns)
+        logger.info(
+            "CO2RRTask.generate_candidates: produced %d rows "
+            "(continuous=%d Sobol dims, integer=%d uniform dims, seed=%d).",
+            len(df), K_cont, len(int_features), seed,
+        )
+        return df
+
     def build_training_target(
         self,
         df: pd.DataFrame,

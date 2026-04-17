@@ -22,11 +22,12 @@ import pandas as pd
 import torch
 from botorch.acquisition import AcquisitionFunction, UpperConfidenceBound
 from botorch.acquisition.monte_carlo import qNoisyExpectedImprovement
+from botorch.generation import MaxPosteriorSampling
 from botorch.models import SingleTaskGP
 from botorch.optim import optimize_acqf
 from botorch.sampling.normal import SobolQMCNormalSampler
 
-from kabo.utils import get_logger, unnormalize_x
+from kabo.utils import get_logger, round_integer_dims_to_grid, unnormalize_x
 from kabo.preference import PreferenceModel
 from kabo.knowledge import ExpertPrior
 
@@ -206,8 +207,17 @@ def optimize_continuous(
     device: torch.device,
     n_restarts: int = 10,
     raw_samples: int = 256,
+    integer_indices: Optional[list[int]] = None,
+    bounds_raw: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, float]:
     """Optimize the acquisition function over continuous [0,1]^K bounds.
+
+    When ``integer_indices`` is provided, the continuous candidate is
+    snapped to the nearest integer-grid point on those dims after
+    optimization and its acquisition value is recomputed.  This is the
+    "round-trick" of Garrido-Merchán & Hernández-Lobato (JMLR 2020) and
+    is applied as belt-and-suspenders on top of any GP-level integer
+    handling.
 
     Parameters
     ----------
@@ -221,6 +231,14 @@ def optimize_continuous(
         Number of random restarts (default 10).
     raw_samples : int, optional
         Number of raw initialization samples (default 256).
+    integer_indices : list[int] or None, optional
+        Dimension indices that must lie on an integer grid in raw space.
+        Requires ``bounds_raw`` to be supplied as well.  Default None
+        (no integer handling).
+    bounds_raw : torch.Tensor or None, optional
+        Raw design-space bounds, shape ``(2, K)``.  Required when
+        ``integer_indices`` is non-empty so that the grid step can be
+        recovered.
 
     Returns
     -------
@@ -241,10 +259,44 @@ def optimize_continuous(
             num_restarts=n_restarts,
             raw_samples=raw_samples,
         )
-        return candidates.squeeze(0), values.item()
+        best = candidates.squeeze(0)
+        best_val = values.item()
+        # ---- P1: snap integer dims to grid (round-trick) ----
+        if integer_indices:
+            if bounds_raw is None:
+                logger.warning(
+                    "integer_indices=%s was supplied but bounds_raw is None; "
+                    "skipping integer grid snap.",
+                    integer_indices,
+                )
+            else:
+                snapped = round_integer_dims_to_grid(
+                    best.unsqueeze(0), integer_indices, bounds_raw,
+                ).squeeze(0)
+                # Recompute acquisition value on the snapped point so the
+                # orchestrator ranks apples-to-apples with discrete candidates.
+                try:
+                    with torch.no_grad():
+                        new_val = float(acq_func(snapped.unsqueeze(0).unsqueeze(0)).item())
+                    logger.debug(
+                        "Integer round-trick: continuous acq %.4f -> snapped acq %.4f",
+                        best_val, new_val,
+                    )
+                    best = snapped
+                    best_val = new_val
+                except Exception as err:
+                    logger.warning(
+                        "Failed to re-evaluate acquisition on snapped "
+                        "candidate (%s); keeping unsnapped.", err,
+                    )
+        return best, best_val
     except Exception as e:
         logger.warning("optimize_acqf failed: %s. Using random point.", e)
         rand_cand = torch.rand(K, dtype=torch.double, device=device)
+        if integer_indices and bounds_raw is not None:
+            rand_cand = round_integer_dims_to_grid(
+                rand_cand.unsqueeze(0), integer_indices, bounds_raw,
+            ).squeeze(0)
         return rand_cand, 0.0
 
 
@@ -489,6 +541,172 @@ def evaluate_discrete_candidates(
         orig_row_idx = int(valid_full_indices[int(local_valid[idx])])
         results.append((cand_tensor, float(acq_values[idx]), orig_row_idx))
 
+    return results
+
+
+def evaluate_discrete_thompson(
+    model: SingleTaskGP,
+    candidates_df: pd.DataFrame,
+    selected_features: list[str],
+    bounds_raw: torch.Tensor,
+    device: torch.device,
+    all_feature_columns: list[str],
+    design_bounds: dict[str, tuple[float, float]],
+    top_n: int = 5,
+    strict_full_bounds: bool = True,
+) -> list[tuple[torch.Tensor, float, int]]:
+    """Select top-N discrete candidates via **Thompson sampling** from the
+    GP posterior (P3 of discrete variables proposal).
+
+    Draws ``top_n`` independent posterior samples over the full candidate
+    pool and returns the argmax of each sample.  Duplicate argmaxes are
+    filtered out, and the pool is oversampled up to ``4 * top_n`` times
+    to reach the desired unique count.  This yields naturally diverse
+    recommendations without an explicit diversity regulariser and scales
+    to large pools (dynamic generators with thousands of rows) in O(N·q)
+    GP forward passes.
+
+    Parameters
+    ----------
+    model : SingleTaskGP
+        The fitted GP surrogate (its posterior is sampled directly; no
+        explicit acquisition function is needed).
+    candidates_df, selected_features, bounds_raw, device,
+    all_feature_columns, design_bounds, top_n, strict_full_bounds
+        Same meanings as :func:`evaluate_discrete_candidates`.
+
+    Returns
+    -------
+    list[tuple[torch.Tensor, float, int]]
+        ``(candidate_normalized, posterior_sample_value, original_row_idx)``
+        triples.  The "acquisition value" field is the sample value the
+        sampler assigned to the winning candidate in its draw; this is
+        monotonic with the predicted target so higher is better.  The
+        list is returned in draw order (not sorted) — duplicates removed.
+    """
+    # ---- Re-use evaluate_discrete_candidates' pre-filter path by
+    #      duplicating the strict_full_bounds / GP-bounds checks here.
+    if strict_full_bounds:
+        full_bounds_mask = np.ones(len(candidates_df), dtype=bool)
+        for feat in all_feature_columns:
+            if feat in candidates_df.columns and feat in design_bounds:
+                lo, hi = design_bounds[feat]
+                vals = candidates_df[feat].values.astype(np.float64)
+                full_bounds_mask &= (vals >= lo) & (vals <= hi)
+        n_full_excluded = (~full_bounds_mask).sum()
+        if n_full_excluded > 0:
+            logger.warning(
+                "[strict_full_bounds] Excluded %d / %d candidates with "
+                "at least one feature outside design-space bounds.",
+                n_full_excluded, len(candidates_df),
+            )
+        valid_full_indices = np.where(full_bounds_mask)[0]
+        working_df = candidates_df.iloc[valid_full_indices].reset_index(drop=True)
+    else:
+        valid_full_indices = np.arange(len(candidates_df))
+        working_df = candidates_df
+
+    if len(working_df) == 0:
+        logger.warning("No discrete candidates within full design bounds.")
+        return []
+
+    X_cand_raw = working_df[selected_features].values.astype(np.float64)
+    bounds_np = bounds_raw.cpu().numpy()
+    x_min, x_max = bounds_np[0], bounds_np[1]
+    x_range = x_max - x_min
+    x_range[x_range == 0] = 1.0
+
+    in_bounds_mask = np.all(
+        (X_cand_raw >= x_min) & (X_cand_raw <= x_max), axis=1
+    )
+    n_excluded = (~in_bounds_mask).sum()
+    if n_excluded > 0:
+        logger.warning(
+            "Excluded %d / %d candidates outside selected-feature bounds.",
+            n_excluded, len(X_cand_raw),
+        )
+
+    local_valid = np.where(in_bounds_mask)[0]
+    X_valid = X_cand_raw[in_bounds_mask]
+    if len(X_valid) == 0:
+        logger.warning("No discrete candidates within design bounds.")
+        return []
+
+    X_norm = (X_valid - x_min) / x_range
+    X_tensor = torch.tensor(X_norm, dtype=torch.double, device=device)
+    # MaxPosteriorSampling expects shape (N, d) — no q-batch dim.
+
+    # Draw oversampled posterior samples to get `top_n` unique argmaxes.
+    sampler = MaxPosteriorSampling(model=model, replacement=False)
+    max_draws = max(top_n * 4, top_n + 2)
+    picked_local_indices: list[int] = []
+    seen: set[int] = set()
+
+    try:
+        with torch.no_grad():
+            samples = sampler(X_tensor, num_samples=max_draws)
+        # `samples` has shape (num_samples, d); find each in X_tensor.
+        # Use exact equality on normalized float coords (safe since the
+        # sampler picks rows from X_tensor itself, so values are bit-exact).
+        for i in range(samples.shape[0]):
+            row = samples[i]
+            matches = torch.all(X_tensor == row, dim=1).nonzero(as_tuple=False)
+            if matches.numel() == 0:
+                # Fallback: closest match
+                dist = torch.norm(X_tensor - row, dim=1)
+                local_idx = int(dist.argmin().item())
+            else:
+                local_idx = int(matches[0].item())
+            if local_idx in seen:
+                continue
+            seen.add(local_idx)
+            picked_local_indices.append(local_idx)
+            if len(picked_local_indices) >= top_n:
+                break
+    except Exception as err:
+        logger.warning(
+            "Thompson sampling failed (%s); falling back to posterior-mean "
+            "ranking on the candidate pool.",
+            err,
+        )
+        with torch.no_grad():
+            post = model.posterior(X_tensor)
+            mean = post.mean.squeeze(-1).cpu().numpy()
+        # Also fall back to top-N by predicted mean.
+        order = np.argsort(mean)[::-1]
+        picked_local_indices = [int(i) for i in order[:top_n]]
+
+    # Pad if we still have fewer than top_n uniques (rare; only when pool
+    # is smaller than top_n).
+    if len(picked_local_indices) < top_n:
+        remaining = [
+            i for i in range(len(X_norm)) if i not in seen
+        ][: top_n - len(picked_local_indices)]
+        picked_local_indices.extend(remaining)
+
+    # Score each picked candidate by its posterior mean (monotonic proxy
+    # for display; actual TS ranking is implicit in the draw order).
+    if picked_local_indices:
+        with torch.no_grad():
+            picked_tensor = X_tensor[picked_local_indices]
+            post = model.posterior(picked_tensor)
+            means = post.mean.squeeze(-1).cpu().numpy().ravel()
+    else:
+        means = np.array([])
+
+    results: list[tuple[torch.Tensor, float, int]] = []
+    for rank, (local_idx, mu) in enumerate(zip(picked_local_indices, means)):
+        cand_tensor = torch.tensor(
+            X_norm[local_idx], dtype=torch.double, device=device,
+        )
+        orig_row_idx = int(valid_full_indices[int(local_valid[local_idx])])
+        # Store mu as the "acq value" so downstream ranking/printing works
+        # uniformly.  Higher is better.
+        results.append((cand_tensor, float(mu), orig_row_idx))
+    logger.info(
+        "Thompson sampling: drew %d samples, returned %d unique picks.",
+        max_draws, len(results),
+    )
     return results
 
 

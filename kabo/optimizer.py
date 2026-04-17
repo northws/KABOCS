@@ -179,6 +179,9 @@ class KABOOptimizer:
         diversity_weight: float = 0.5,
         pe_budget: int = 0,
         lambda_v: float = 0.0,
+        generate_candidates_n: int = 1000,
+        prefer_file_candidates: bool = False,
+        discrete_strategy: str = "acq",
     ) -> None:
         # Domain layer: default to CO2RR task for backward compatibility.
         self.task: TaskBase = task if task is not None else CO2RRTask()
@@ -212,7 +215,12 @@ class KABOOptimizer:
         self.diversity_weight = diversity_weight
         self.pe_budget = pe_budget
         self.lambda_v = lambda_v
-        
+        # P2: dynamic candidate pool controls
+        self.generate_candidates_n = int(generate_candidates_n)
+        self.prefer_file_candidates = bool(prefer_file_candidates)
+        # P3: discrete candidate ranking strategy ("acq" or "thompson")
+        self.discrete_strategy = str(discrete_strategy).lower()
+
         if self.kabo_mode:
             logger.info(
                 f"KABO Mode ENABLED: lambda_p={self.lambda_p}, lambda_k={self.lambda_k}"
@@ -338,6 +346,7 @@ class KABOOptimizer:
             lambda_p=self.lambda_p,
             lambda_k=self.lambda_k,
             lambda_v=self.lambda_v,
+            discrete_strategy=self.discrete_strategy,
         )
 
         # Design-space bounds (sourced from the Task; can be customized)
@@ -482,6 +491,7 @@ class KABOOptimizer:
         self.engine.fit_surrogate(
             X_raw, Y_raw, self.selected_features,
             design_bounds=self.design_bounds,
+            feature_types=self.task.feature_types(),
         )
         logger.info("Phase 2 complete.")
 
@@ -548,11 +558,51 @@ class KABOOptimizer:
                 self.selected_features,
             )
 
-        self._discrete_candidates_df = load_discrete_candidates(
-            self.candidates_path, self.selected_features,
-            all_feature_columns=self.task.feature_columns(),
-            design_bounds=self.design_bounds,
-        )
+        # ---------------------------------------------------------------
+        # P2: prefer Task-provided dynamic candidate pool over static CSV.
+        # ---------------------------------------------------------------
+        df_from_task: Optional[pd.DataFrame] = None
+        if not self.prefer_file_candidates:
+            try:
+                df_from_task = self.task.generate_candidates(
+                    n=self.generate_candidates_n,
+                    seed=self.seed if self.seed is not None else 0,
+                )
+            except Exception as gen_err:
+                logger.warning(
+                    "Task.generate_candidates() raised %s; falling back to "
+                    "candidates_path CSV.", gen_err,
+                )
+                df_from_task = None
+
+        if df_from_task is not None:
+            # Validate Task-generated candidates against Task schema the
+            # same way we'd validate a CSV.  Convert DataFrame via temporary
+            # in-memory bypass of load_discrete_candidates: here we only
+            # run the bounds sanity check inline (feature columns are
+            # guaranteed present by the generator contract).
+            missing = set(self.task.feature_columns()) - set(df_from_task.columns)
+            if missing:
+                logger.warning(
+                    "Task.generate_candidates returned a frame missing "
+                    "feature columns %s; falling back to candidates_path.",
+                    sorted(missing),
+                )
+                df_from_task = None
+            else:
+                logger.info(
+                    "Using Task-generated candidate pool: %d rows "
+                    "(override with --prefer-file-candidates to use CSV).",
+                    len(df_from_task),
+                )
+                self._discrete_candidates_df = df_from_task
+
+        if df_from_task is None:
+            self._discrete_candidates_df = load_discrete_candidates(
+                self.candidates_path, self.selected_features,
+                all_feature_columns=self.task.feature_columns(),
+                design_bounds=self.design_bounds,
+            )
 
         K = len(self.selected_features)
         self._beta_trace = []
@@ -1007,6 +1057,7 @@ class KABOOptimizer:
 
         metadata = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
+            "task": self.task.task_name(),
             "data_path": str(self.data_path),
             "target_column": self.target_column,
             "top_k": self.top_k,
@@ -1033,6 +1084,11 @@ class KABOOptimizer:
             "lambda_p": self.lambda_p if self.kabo_mode else None,
             "lambda_k": self.lambda_k if self.kabo_mode else None,
             "expert_prior_file": str(self.expert_prior_file) if self.expert_prior_file else None,
+            # P2/P3 discrete variables proposal — audit trail for reproducibility
+            "discrete_strategy": self.discrete_strategy,
+            "generate_candidates_n": self.generate_candidates_n,
+            "prefer_file_candidates": self.prefer_file_candidates,
+            "feature_types": self.task.feature_types(),
             "n_rows_final": int(len(result_df)),
             "output_data": str(output_path),
         }

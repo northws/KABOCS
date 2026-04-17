@@ -31,6 +31,7 @@ from kabo.acquisition import (
     build_qnei,
     build_ucb,
     evaluate_discrete_candidates,
+    evaluate_discrete_thompson,
     optimize_continuous,
 )
 from kabo.knowledge import ExpertPrior
@@ -88,6 +89,7 @@ class KABOEngine:
         lambda_p: float = 1.0,
         lambda_k: float = 1.0,
         lambda_v: float = 0.0,
+        discrete_strategy: str = "acq",
     ) -> None:
         self.device = device
         self.kernel_type = kernel_type
@@ -100,6 +102,19 @@ class KABOEngine:
         self.lambda_p = float(lambda_p)
         self.lambda_k = float(lambda_k)
         self.lambda_v = float(lambda_v)
+
+        # P3 of discrete variables proposal: how to rank candidate pool.
+        # ``"acq"``     — score every candidate with the acquisition function
+        #                 (current default; identical to legacy behaviour).
+        # ``"thompson"`` — draw top_n independent posterior samples and
+        #                 return their argmaxes (natural diversity,
+        #                 scales to large dynamic pools).
+        self.discrete_strategy = str(discrete_strategy).lower()
+        if self.discrete_strategy not in {"acq", "thompson"}:
+            raise ValueError(
+                f"Unsupported discrete_strategy='{discrete_strategy}'. "
+                "Use 'acq' or 'thompson'."
+            )
 
         # Stateful algorithmic components.
         self.surrogate = SurrogateModel(device)
@@ -136,11 +151,21 @@ class KABOEngine:
         Y_raw: np.ndarray,
         selected_features: list[str],
         design_bounds: dict[str, tuple[float, float]],
+        feature_types: Optional[dict[str, str]] = None,
     ):
         """Fit / refit the GP surrogate on raw (X, y).
 
         Normalization and standardization are handled internally by
         ``SurrogateModel.fit`` using the supplied design-space bounds.
+
+        Parameters
+        ----------
+        feature_types : dict[str, str] or None, optional
+            Per-feature type labels from ``TaskBase.feature_types()``.
+            When non-empty, categorical dims switch the GP to
+            ``MixedSingleTaskGP`` and integer dims enable grid-snap in
+            subsequent ``suggest_continuous`` calls.  Default ``None``
+            preserves legacy all-continuous behaviour.
         """
         return self.surrogate.fit(
             X_raw,
@@ -148,6 +173,7 @@ class KABOEngine:
             selected_features,
             design_bounds=design_bounds,
             kernel_type=self.kernel_type,
+            feature_types=feature_types,
         )
 
     # ------------------------------------------------------------------
@@ -252,10 +278,18 @@ class KABOEngine:
         acq_func,
         dim: int,
     ) -> tuple[torch.Tensor, float]:
-        """Optimize the acquisition function over ``[0, 1]^dim``."""
+        """Optimize the acquisition function over ``[0, 1]^dim``.
+
+        When the surrogate was fit with ``feature_types`` declaring
+        integer dims, those dims are snapped to their raw integer grid
+        after continuous optimization (round-trick) and the acquisition
+        value is recomputed on the snapped point.
+        """
         return optimize_continuous(
             acq_func, dim, self.device,
             self.n_restarts, self.raw_samples,
+            integer_indices=self.surrogate.integer_indices,
+            bounds_raw=self.surrogate.bounds_raw,
         )
 
     def evaluate_discrete(
@@ -266,7 +300,13 @@ class KABOEngine:
         all_feature_columns: list[str],
         design_bounds: dict[str, tuple[float, float]],
     ) -> list[tuple[torch.Tensor, float, int]]:
-        """Evaluate the acquisition function on a discrete candidate pool.
+        """Rank the discrete candidate pool under the configured strategy.
+
+        Dispatches based on ``self.discrete_strategy``:
+
+        * ``"acq"``     — uses the supplied acquisition function (default).
+        * ``"thompson"`` — ignores ``acq_func`` and draws posterior samples
+          directly from the surrogate (see :func:`evaluate_discrete_thompson`).
 
         ``all_feature_columns`` and ``design_bounds`` must be supplied by
         the orchestrator (originating from the active ``Task``) so that
@@ -276,6 +316,19 @@ class KABOEngine:
             raise RuntimeError(
                 "Surrogate must be fit before evaluating discrete candidates."
             )
+        if self.discrete_strategy == "thompson":
+            if self.surrogate.model is None:
+                raise RuntimeError(
+                    "Surrogate model is None; cannot run Thompson sampling."
+                )
+            return evaluate_discrete_thompson(
+                self.surrogate.model,
+                candidates_df, selected_features,
+                self.surrogate.bounds_raw, self.device,
+                all_feature_columns=all_feature_columns,
+                design_bounds=design_bounds,
+            )
+        # Default: acquisition-function scoring.
         return evaluate_discrete_candidates(
             acq_func, candidates_df, selected_features,
             self.surrogate.bounds_raw, self.device,

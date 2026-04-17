@@ -202,3 +202,107 @@ def unstandardize_y(y_std_val: float, y_mean: float, y_std: float) -> float:
         Target value in original scale.
     """
     return y_std_val * y_std + y_mean
+
+
+# ---------------------------------------------------------------------------
+# Integer / grid-snap helpers (P1 of discrete variables proposal)
+# ---------------------------------------------------------------------------
+def round_integer_dims_to_grid(
+    X_norm: torch.Tensor,
+    integer_indices: list[int],
+    bounds_raw: torch.Tensor,
+) -> torch.Tensor:
+    """Snap integer dims in normalized [0,1] space to their nearest
+    valid integer-grid point.
+
+    For a raw integer dim with bounds ``(lo, hi)``, there are
+    ``n = hi - lo`` normalized gridlines at ``{0, 1/n, 2/n, ..., 1}``
+    corresponding to raw integers ``{lo, lo+1, ..., hi}``.  This function
+    rounds each of the specified normalized dims to the nearest gridline
+    and clamps to ``[0, 1]``.
+
+    Does not mutate input; returns a new tensor.
+
+    Parameters
+    ----------
+    X_norm : torch.Tensor
+        Normalized feature tensor, shape ``(..., K)``.  Values assumed to
+        lie in ``[0, 1]`` but this is not enforced.
+    integer_indices : list[int]
+        Dimension indices that must snap to an integer grid in raw space.
+    bounds_raw : torch.Tensor
+        Raw design-space bounds, shape ``(2, K)`` — row 0 is min, row 1
+        is max.  Used to recover the raw integer step.
+
+    Returns
+    -------
+    torch.Tensor
+        New tensor of the same shape as ``X_norm`` with integer dims
+        snapped to the nearest grid point.
+    """
+    if not integer_indices:
+        return X_norm
+    Y = X_norm.clone()
+    for idx in integer_indices:
+        lo = float(bounds_raw[0, idx].item())
+        hi = float(bounds_raw[1, idx].item())
+        span = hi - lo
+        if span <= 0:
+            # Degenerate dim (single allowed value): snap to 0.0
+            Y[..., idx] = 0.0
+            continue
+        # Number of integer intervals; for lo=0, hi=6 -> 6 intervals, 7 values.
+        n_intervals = int(round(span))
+        if n_intervals <= 0:
+            Y[..., idx] = 0.0
+            continue
+        step = 1.0 / n_intervals
+        Y[..., idx] = (Y[..., idx] / step).round() * step
+        Y[..., idx] = Y[..., idx].clamp(0.0, 1.0)
+    return Y
+
+
+def integer_indices_from_types(
+    selected_features: list[str],
+    feature_types: Optional[dict[str, str]],
+) -> list[int]:
+    """Extract integer-dim indices (within ``selected_features``).
+
+    Parameters
+    ----------
+    selected_features : list[str]
+        Ordered list of feature names currently used by the surrogate.
+    feature_types : dict[str, str] or None
+        Mapping from feature name to type label (``"continuous"`` |
+        ``"integer"`` | ``"categorical"`` | ``"ordinal"``).  ``None`` is
+        treated as "all continuous".
+
+    Returns
+    -------
+    list[int]
+        Indices (into ``selected_features``) whose declared type is
+        ``"integer"``.  Empty list if no such features.
+    """
+    if not feature_types:
+        return []
+    return [
+        idx
+        for idx, name in enumerate(selected_features)
+        if feature_types.get(name, "continuous") == "integer"
+    ]
+
+
+def categorical_indices_from_types(
+    selected_features: list[str],
+    feature_types: Optional[dict[str, str]],
+) -> list[int]:
+    """Extract categorical / ordinal dim indices (within
+    ``selected_features``).  See :func:`integer_indices_from_types`.
+    """
+    if not feature_types:
+        return []
+    return [
+        idx
+        for idx, name in enumerate(selected_features)
+        if feature_types.get(name, "continuous") in ("categorical", "ordinal")
+    ]
