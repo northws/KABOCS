@@ -1,0 +1,5 @@
+# Extra dependencies required only by the web UI backend.
+# Install with:  pip install -r webui/requirements.txt
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7

@@ -41,6 +41,13 @@ env/
 output/
 
 # ========================================
+# WebUI (frontend build artifacts)
+# ========================================
+webui/frontend/node_modules/
+webui/frontend/dist/
+webui/frontend/.vite/
+
+# ========================================
 # Legacy / Deprecated
 # ========================================
 co2rr_optimizer.py

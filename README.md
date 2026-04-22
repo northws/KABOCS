@@ -25,6 +25,26 @@
 
 - [技术报告 · /docs/report.pdf](/docs/report.pdf)
 - [参数说明 · /docs/Parameters.md](/docs/Parameters.md)
+- [WebUI · /webui/README.md](/webui/README.md)
+
+---
+
+## WebUI（浏览器控制台）
+
+除了 CLI，本项目还提供一个 **React + FastAPI** 的浏览器控制台，支持：
+
+- 配置任何注册的 Task、一键启动/停止贝叶斯优化运行
+- 完整人机交互循环（选候选点 / 手动覆盖 / 填产率 / 非选特征 / PE 成对比较）
+- 在浏览器里直接编辑 `data/*.csv` 与 `priors/*.json`
+- 历史运行仪表盘（元数据、特征重要性图、β 轨迹、更新后的数据集）
+
+```bash
+pip install -r webui/requirements.txt
+(cd webui/frontend && npm install && npm run build)
+python webui/run_webui.py    # 打开 http://127.0.0.1:8000
+```
+
+详细启动与架构说明见 [`webui/README.md`](/webui/README.md)。
 
 ---
 
