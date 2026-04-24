@@ -322,6 +322,42 @@ Examples:
             "integration (default 128).  Higher = smoother / slower."
         ),
     )
+    # ------------------------------------------------------------------ #
+    #  v1.2 additions: variational / sparse GP for large datasets
+    # ------------------------------------------------------------------ #
+    parser.add_argument(
+        "--gp-model",
+        choices=["exact", "variational", "auto"],
+        default="auto",
+        dest="gp_model_type",
+        help=(
+            "GP backend for the surrogate.  'exact' uses the classic "
+            "SingleTaskGP with an O(N^3) Cholesky (accurate for small "
+            "N); 'variational' uses SingleTaskVariationalGP with "
+            "inducing points and O(N m^2) cost (SVGP, recommended for "
+            "N >~ 200); 'auto' (default) picks variational when the "
+            "training set is large and exact otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--num-inducing-points", type=int, default=None,
+        help=(
+            "Number of inducing points for the variational GP (ignored "
+            "for 'exact').  Defaults to min(N, 100).  Increase for "
+            "denser posteriors at the cost of O(N m^2) compute."
+        ),
+    )
+    parser.add_argument(
+        "--svgp-epochs", type=int, default=200,
+        help=(
+            "Adam epochs used to train the variational ELBO (default "
+            "200).  Ignored for 'exact'."
+        ),
+    )
+    parser.add_argument(
+        "--svgp-lr", type=float, default=1e-2,
+        help="Learning rate for the variational ELBO Adam loop (default 1e-2).",
+    )
     return parser
 
 
@@ -407,6 +443,10 @@ def main() -> None:
         objectives=args.objectives,
         ref_point=args.ref_point,
         qnehvi_mc_samples=args.qnehvi_mc_samples,
+        gp_model_type=args.gp_model_type,
+        num_inducing_points=args.num_inducing_points,
+        svgp_epochs=args.svgp_epochs,
+        svgp_lr=args.svgp_lr,
     )
 
     optimizer.run(

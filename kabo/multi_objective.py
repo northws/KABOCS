@@ -175,6 +175,10 @@ class MultiObjectiveSurrogate:
         design_bounds: dict[str, tuple[float, float]],
         kernel_type: str = "matern",
         feature_types: Optional[dict[str, str]] = None,
+        gp_model_type: str = "auto",
+        num_inducing_points: Optional[int] = None,
+        svgp_epochs: int = 200,
+        svgp_lr: float = 1e-2,
     ) -> "ModelListGP":
         """Fit every sub-surrogate and wrap them in a ``ModelListGP``.
 
@@ -239,6 +243,10 @@ class MultiObjectiveSurrogate:
                 design_bounds=design_bounds,
                 kernel_type=kernel_type,
                 feature_types=feature_types,
+                gp_model_type=gp_model_type,
+                num_inducing_points=num_inducing_points,
+                svgp_epochs=svgp_epochs,
+                svgp_lr=svgp_lr,
             )
             botorch_models.append(self.submodels[i].model)
 

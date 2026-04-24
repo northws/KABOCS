@@ -185,6 +185,10 @@ class KABOOptimizer:
         q_batch: int = 1,
         max_stagnation: int = 0,
         stagnation_tol: float = 1e-4,
+        gp_model_type: str = "auto",
+        num_inducing_points: Optional[int] = None,
+        svgp_epochs: int = 200,
+        svgp_lr: float = 1e-2,
         multi_objective: bool = False,
         objectives: Optional[list] = None,
         ref_point: Optional[list[float]] = None,
@@ -297,6 +301,24 @@ class KABOOptimizer:
                 f"Unsupported kernel_type='{kernel_type}'. "
                 "Use 'matern' or 'spectral_mixture'."
             )
+        # v1.2: GP backend selection.  Validation is cheap & fails loud.
+        self.gp_model_type = str(gp_model_type).lower()
+        if self.gp_model_type not in {"exact", "variational", "auto"}:
+            raise ValueError(
+                f"Unsupported gp_model_type='{gp_model_type}'. "
+                "Use 'exact', 'variational', or 'auto'."
+            )
+        if num_inducing_points is not None and int(num_inducing_points) <= 0:
+            raise ValueError("num_inducing_points must be a positive integer.")
+        self.num_inducing_points = (
+            None if num_inducing_points is None else int(num_inducing_points)
+        )
+        self.svgp_epochs = int(svgp_epochs)
+        self.svgp_lr = float(svgp_lr)
+        if self.svgp_epochs <= 0:
+            raise ValueError("svgp_epochs must be a positive integer.")
+        if self.svgp_lr <= 0:
+            raise ValueError("svgp_lr must be > 0.")
         if self.h2_penalty_weight < 0:
             raise ValueError("h2_penalty_weight must be >= 0.")
         if not (np.isfinite(self.diversity_weight) and self.diversity_weight >= 0):
@@ -399,6 +421,10 @@ class KABOOptimizer:
             lambda_k=self.lambda_k,
             lambda_v=self.lambda_v,
             discrete_strategy=self.discrete_strategy,
+            gp_model_type=self.gp_model_type,
+            num_inducing_points=self.num_inducing_points,
+            svgp_epochs=self.svgp_epochs,
+            svgp_lr=self.svgp_lr,
         )
 
         # Design-space bounds (sourced from the Task; can be customized)
@@ -1373,6 +1399,20 @@ class KABOOptimizer:
             "acq_strategy": self.acq_strategy,
             "qnei_mc_samples": self.qnei_mc_samples,
             "kernel_type": self.kernel_type,
+            # v1.2 audit — GP backend (what user asked + what was actually used)
+            "gp_model_type": self.gp_model_type,
+            "gp_model_type_resolved": (
+                self.engine.surrogate.gp_model_type
+                if self.engine.surrogate.model is not None
+                else None
+            ),
+            "num_inducing_points": (
+                self.engine.surrogate.num_inducing_points
+                if self.engine.surrogate.model is not None
+                else self.num_inducing_points
+            ),
+            "svgp_epochs": self.svgp_epochs,
+            "svgp_lr": self.svgp_lr,
             "h2_penalty_weight": self.h2_penalty_weight,
             "beta": self.beta,
             "beta_schedule": self.beta_schedule,

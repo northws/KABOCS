@@ -216,3 +216,90 @@ class TestDemoRunTestTask:
         assert opt.multi_objective is True
         assert {o.column for o in opt.objectives} == {"y", "y2"}
         opt.run(n_iterations=1, interactive=False)
+
+    def test_variational_gp_runs_and_is_logged_in_metadata(
+        self,
+        tmp_path: Path,
+        test_data_csv: Path,
+    ):
+        """``--gp-model variational`` swaps SingleTaskGP → SVGP end-to-end.
+
+        Uses a small inducing count so the Adam loop is fast on CPU.
+        Asserts:
+          * the surrogate type switched,
+          * ``num_inducing_points`` is ≤ N,
+          * SVGP-specific metadata was persisted to ``run_metadata.json``.
+        """
+        KABOOptimizer, TestTask = _import_optimizer()
+        from kabo.surrogate import SingleTaskVariationalGP, _HAS_SVGP
+
+        if not _HAS_SVGP:
+            pytest.skip("SingleTaskVariationalGP unavailable in this BoTorch")
+
+        out_dir = tmp_path / "svgp_run"
+        opt = KABOOptimizer(
+            data_path=test_data_csv,
+            task=TestTask(),
+            top_k=3,
+            seed=23,
+            output_dir=out_dir,
+            skip_feature_selection=True,
+            candidates_path=None,
+            device="cpu",
+            gp_model_type="variational",
+            num_inducing_points=5,
+            svgp_epochs=20,     # short — smoke only
+            svgp_lr=5e-2,
+        )
+        opt.run(n_iterations=1, interactive=False)
+
+        # Surrogate type swap.
+        assert opt.engine.surrogate.gp_model_type == "variational"
+        assert isinstance(opt.engine.surrogate.model, SingleTaskVariationalGP)
+        assert opt.engine.surrogate.num_inducing_points is not None
+        assert opt.engine.surrogate.num_inducing_points <= (
+            opt.engine.surrogate.train_X.shape[0]
+        )
+
+        # Metadata audit.
+        meta = json.loads((out_dir / "run_metadata.json").read_text())
+        assert meta["gp_model_type"] == "variational"
+        assert meta["gp_model_type_resolved"] == "variational"
+        assert meta["num_inducing_points"] == 5
+        assert meta["svgp_epochs"] == 20
+
+    def test_auto_routing_stays_exact_on_small_N(
+        self,
+        tmp_path: Path,
+        test_data_csv: Path,
+    ):
+        """The 'auto' policy must pick 'exact' for the tiny TestTask CSV.
+
+        TestTask ships only a handful of rows — below the SVGP threshold
+        (200) — so the surrogate should stay on the classic ExactGP path
+        and ``num_inducing_points`` should remain ``None``.
+        """
+        KABOOptimizer, TestTask = _import_optimizer()
+        from kabo.surrogate import SingleTaskGP
+
+        out_dir = tmp_path / "auto_run"
+        opt = KABOOptimizer(
+            data_path=test_data_csv,
+            task=TestTask(),
+            top_k=3,
+            seed=29,
+            output_dir=out_dir,
+            skip_feature_selection=True,
+            candidates_path=None,
+            device="cpu",
+            gp_model_type="auto",   # explicit, though it's the default
+        )
+        opt.run(n_iterations=1, interactive=False)
+
+        assert opt.engine.surrogate.gp_model_type == "exact"
+        assert isinstance(opt.engine.surrogate.model, SingleTaskGP)
+
+        meta = json.loads((out_dir / "run_metadata.json").read_text())
+        assert meta["gp_model_type"] == "auto"
+        assert meta["gp_model_type_resolved"] == "exact"
+        assert meta["num_inducing_points"] is None

@@ -74,6 +74,31 @@ class TestBuildParser:
         )
         assert args.ref_point == pytest.approx([0.0, 5.0])
 
+    def test_gp_model_defaults_to_auto(self):
+        args = build_parser().parse_args([])
+        assert args.gp_model_type == "auto"
+        assert args.num_inducing_points is None
+        assert args.svgp_epochs == 200
+        assert args.svgp_lr == pytest.approx(1e-2)
+
+    def test_gp_model_variational(self):
+        args = build_parser().parse_args(
+            [
+                "--gp-model", "variational",
+                "--num-inducing-points", "50",
+                "--svgp-epochs", "300",
+                "--svgp-lr", "5e-3",
+            ]
+        )
+        assert args.gp_model_type == "variational"
+        assert args.num_inducing_points == 50
+        assert args.svgp_epochs == 300
+        assert args.svgp_lr == pytest.approx(5e-3)
+
+    def test_gp_model_rejects_unknown_backend(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["--gp-model", "deep_kernel"])
+
 
 class TestParseArgsConfigMerge:
     def test_config_file_fills_defaults(self, tmp_path: Path):

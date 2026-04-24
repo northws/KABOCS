@@ -42,6 +42,28 @@ except ImportError:  # pragma: no cover — BoTorch too old
     MixedSingleTaskGP = None  # type: ignore
     _HAS_MIXED_GP = False
 
+# v1.2: stochastic variational GP for large N (O(N m^2) vs ExactGP's O(N^3)).
+try:
+    from botorch.models import SingleTaskVariationalGP
+    from gpytorch.mlls import VariationalELBO
+    _HAS_SVGP = True
+except ImportError:  # pragma: no cover — BoTorch too old
+    SingleTaskVariationalGP = None  # type: ignore
+    VariationalELBO = None  # type: ignore
+    _HAS_SVGP = False
+
+# Training-size heuristic for the "auto" routing.  Under ~200 points the
+# Cholesky factor in ExactGP is cheap and more accurate; above ~200 points
+# SVGP starts to pay off in wall-clock time for a small accuracy hit.
+_SVGP_AUTO_THRESHOLD = 200
+
+# Default inducing-point count when the user does not specify one.  Capped
+# at ``min(N, this)`` inside ``fit()``.
+_SVGP_DEFAULT_INDUCING = 100
+
+# Default number of Adam epochs for SVGP.
+_SVGP_DEFAULT_EPOCHS = 200
+
 logger = get_logger(__name__)
 
 
@@ -92,6 +114,10 @@ class SurrogateModel:
         self.integer_indices: list[int] = []
         self.categorical_indices: list[int] = []
         self.feature_types: Optional[dict[str, str]] = None
+        # v1.2: which backend was actually used — "exact" or "variational".
+        # Populated by fit(); surfaced in run_metadata.json.
+        self.gp_model_type: str = "exact"
+        self.num_inducing_points: Optional[int] = None
 
     def fit(
         self,
@@ -101,14 +127,30 @@ class SurrogateModel:
         design_bounds: dict[str, tuple[float, float]],
         kernel_type: str = "matern",
         feature_types: Optional[dict[str, str]] = None,
+        gp_model_type: str = "auto",
+        num_inducing_points: Optional[int] = None,
+        svgp_epochs: int = _SVGP_DEFAULT_EPOCHS,
+        svgp_lr: float = 1e-2,
     ) -> SingleTaskGP:
         """Build and fit the GP surrogate model.
 
         Steps:
         1. Normalize X to [0, 1] using explicit design-space bounds.
         2. Standardize Y (zero mean, unit variance).
-        3. Define SingleTaskGP using the specified kernel (Matern or SpectralMixture).
-        4. Fit hyperparameters via ExactMarginalLogLikelihood + fit_gpytorch_mll.
+        3. Define the GP:
+           * ``gp_model_type="exact"`` (legacy) → ``SingleTaskGP`` with
+             the chosen kernel (Matern / SpectralMixture), or
+             ``MixedSingleTaskGP`` when categorical dims are declared.
+           * ``gp_model_type="variational"`` → ``SingleTaskVariationalGP``
+             with ``num_inducing_points`` inducing locations
+             (Cholesky variational distribution).
+           * ``gp_model_type="auto"`` → ``"variational"`` when
+             ``N >= _SVGP_AUTO_THRESHOLD`` (currently 200), else
+             ``"exact"``.  Categorical Tasks always route to exact
+             because ``MixedSingleTaskGP`` has no variational twin.
+        4. Fit hyperparameters via ``ExactMarginalLogLikelihood +
+           fit_gpytorch_mll`` (exact) or ``VariationalELBO`` + Adam
+           (variational).
 
         Parameters
         ----------
@@ -131,6 +173,15 @@ class SurrogateModel:
             stored for acquisition-time grid snapping (see
             :func:`kabo.utils.round_integer_dims_to_grid`).  ``None`` (the
             default) preserves legacy behaviour (all continuous).
+        gp_model_type : {"exact", "variational", "auto"}, optional
+            See docstring above.  Default ``"auto"``.
+        num_inducing_points : int or None, optional
+            Number of inducing points for the variational path.
+            Defaults to ``min(N, 100)``.  Capped at ``N``.
+        svgp_epochs : int, optional
+            Adam epochs for the variational ELBO loop (default 200).
+        svgp_lr : float, optional
+            Learning rate for Adam in the variational loop (default 1e-2).
 
         Returns
         -------
@@ -208,73 +259,90 @@ class SurrogateModel:
                                    self.bounds_raw.cpu().numpy().T):
             logger.info("  %-35s  [%.4f, %.4f]", feat, lo, hi)
 
-        # ----- 3. Define the GP model -----
-        # Route to MixedSingleTaskGP when Task declared categorical dims.
-        use_mixed = bool(self.categorical_indices) and _HAS_MIXED_GP
-
-        if use_mixed:
-            if kernel_type != "matern":
-                logger.warning(
-                    "MixedSingleTaskGP ignores kernel_type='%s' for its "
-                    "continuous factor; using BoTorch defaults.",
-                    kernel_type,
-                )
-            self.model = MixedSingleTaskGP(
-                train_X=self.train_X,
-                train_Y=self.train_Y,
-                cat_dims=list(self.categorical_indices),
-            ).to(self.device)
-            logger.info(
-                "Using MixedSingleTaskGP (cat_dims=%s, %d continuous dim(s)).",
-                self.categorical_indices,
-                K - len(self.categorical_indices),
-            )
-        else:
-            if self.categorical_indices and not _HAS_MIXED_GP:
-                logger.warning(
-                    "MixedSingleTaskGP unavailable in this BoTorch build — "
-                    "falling back to SingleTaskGP; categorical dims will be "
-                    "treated as continuous (less accurate).",
-                )
-            if kernel_type == "matern":
-                covar_module = ScaleKernel(
-                    MaternKernel(nu=2.5, ard_num_dims=K)
-                )
-            elif kernel_type == "spectral_mixture":
-                logger.info("Using SpectralMixtureKernel (derived from CatBOX / catalysis literature).")
-                # 4 mixtures is a reasonable default for standard datasets
-                covar_module = SpectralMixtureKernel(num_mixtures=4, ard_num_dims=K)
-            else:
-                raise ValueError(f"Unknown kernel_type '{kernel_type}'. Choose 'matern' or 'spectral_mixture'.")
-
-            self.model = SingleTaskGP(
-                train_X=self.train_X,
-                train_Y=self.train_Y,
-                covar_module=covar_module,
-            ).to(self.device)
-
-            # For SpectralMixtureKernel, we must initialize parameters from data
-            if kernel_type == "spectral_mixture":
-                covar_module.initialize_from_data(self.train_X, self.train_Y)
-
-        # ----- 4. Fit hyperparameters -----
-        self.mll = ExactMarginalLogLikelihood(
-            self.model.likelihood, self.model
+        # ----- 3. Resolve gp_model_type / routing -----
+        N = int(self.train_X.shape[0])
+        resolved_model_type = self._resolve_gp_model_type(
+            gp_model_type=gp_model_type,
+            N=N,
+            has_categorical=bool(self.categorical_indices),
         )
+        self.gp_model_type = resolved_model_type  # audit field
 
-        logger.info("Fitting GP hyperparameters via marginal likelihood...")
-        try:
-            fit_gpytorch_mll(self.mll)
-        except Exception as e:
-            logger.warning(
-                "fit_gpytorch_mll raised an exception (may still have "
-                "partially converged): %s", e
+        # ----- 4. Define the GP model -----
+        if resolved_model_type == "variational":
+            self._build_variational_gp(
+                K=K, N=N,
+                num_inducing_points=num_inducing_points,
+                kernel_type=kernel_type,
             )
+            self._fit_variational(epochs=svgp_epochs, lr=svgp_lr)
+        else:
+            # Route to MixedSingleTaskGP when Task declared categorical dims.
+            use_mixed = bool(self.categorical_indices) and _HAS_MIXED_GP
+
+            if use_mixed:
+                if kernel_type != "matern":
+                    logger.warning(
+                        "MixedSingleTaskGP ignores kernel_type='%s' for its "
+                        "continuous factor; using BoTorch defaults.",
+                        kernel_type,
+                    )
+                self.model = MixedSingleTaskGP(
+                    train_X=self.train_X,
+                    train_Y=self.train_Y,
+                    cat_dims=list(self.categorical_indices),
+                ).to(self.device)
+                logger.info(
+                    "Using MixedSingleTaskGP (cat_dims=%s, %d continuous dim(s)).",
+                    self.categorical_indices,
+                    K - len(self.categorical_indices),
+                )
+            else:
+                if self.categorical_indices and not _HAS_MIXED_GP:
+                    logger.warning(
+                        "MixedSingleTaskGP unavailable in this BoTorch build — "
+                        "falling back to SingleTaskGP; categorical dims will be "
+                        "treated as continuous (less accurate).",
+                    )
+                if kernel_type == "matern":
+                    covar_module = ScaleKernel(
+                        MaternKernel(nu=2.5, ard_num_dims=K)
+                    )
+                elif kernel_type == "spectral_mixture":
+                    logger.info("Using SpectralMixtureKernel (derived from CatBOX / catalysis literature).")
+                    # 4 mixtures is a reasonable default for standard datasets
+                    covar_module = SpectralMixtureKernel(num_mixtures=4, ard_num_dims=K)
+                else:
+                    raise ValueError(f"Unknown kernel_type '{kernel_type}'. Choose 'matern' or 'spectral_mixture'.")
+
+                self.model = SingleTaskGP(
+                    train_X=self.train_X,
+                    train_Y=self.train_Y,
+                    covar_module=covar_module,
+                ).to(self.device)
+
+                # For SpectralMixtureKernel, we must initialize parameters from data
+                if kernel_type == "spectral_mixture":
+                    covar_module.initialize_from_data(self.train_X, self.train_Y)
+
+            # ----- 5. Fit hyperparameters (exact MLL) -----
+            self.mll = ExactMarginalLogLikelihood(
+                self.model.likelihood, self.model
+            )
+
+            logger.info("Fitting GP hyperparameters via marginal likelihood...")
+            try:
+                fit_gpytorch_mll(self.mll)
+            except Exception as e:
+                logger.warning(
+                    "fit_gpytorch_mll raised an exception (may still have "
+                    "partially converged): %s", e
+                )
 
         # Log learned hyperparameters
         self._log_hyperparameters(selected_features)
 
-        logger.info("GP surrogate model fitted.")
+        logger.info("GP surrogate model fitted (type=%s).", resolved_model_type)
         return self.model
 
     def _log_hyperparameters(self, selected_features: list[str]) -> None:
@@ -283,10 +351,17 @@ class SurrogateModel:
             return
 
         try:
-            covar = self.model.covar_module
+            # SVGP tucks the real kernel one level deeper: model.model.covar_module.
+            if self.gp_model_type == "variational" and hasattr(self.model, "model"):
+                covar = self.model.model.covar_module
+            else:
+                covar = self.model.covar_module
             logger.info("GP Hyperparameters:")
             logger.info("  Noise variance: %.6f",
                          self.model.likelihood.noise.item())
+            if self.gp_model_type == "variational":
+                logger.info("  Backend: SingleTaskVariationalGP (m=%s inducing points)",
+                             self.num_inducing_points)
 
             if isinstance(covar, ScaleKernel) and hasattr(covar, "base_kernel"):
                 outputscale = covar.outputscale.item()
@@ -314,3 +389,169 @@ class SurrogateModel:
                 logger.info("  Kernel type: %s", covar.__class__.__name__)
         except Exception as e:
             logger.debug("Could not log hyperparameters: %s", e)
+
+    # ------------------------------------------------------------------
+    #  v1.2 — Variational GP helpers
+    # ------------------------------------------------------------------
+    def _resolve_gp_model_type(
+        self,
+        gp_model_type: str,
+        N: int,
+        has_categorical: bool,
+    ) -> str:
+        """Pick ``"exact"`` vs ``"variational"`` given the user request.
+
+        Rules
+        -----
+        * ``"exact"`` / ``"variational"`` → honoured verbatim (with
+          safety fallbacks documented below).
+        * ``"auto"`` → ``"variational"`` when ``N >= 200`` **and** no
+          categorical dims are declared, else ``"exact"``.
+
+        Fallbacks
+        ---------
+        * Variational requested but ``SingleTaskVariationalGP`` not
+          available → logs a warning and falls back to ``"exact"``.
+        * Variational + categorical → logs a warning and falls back to
+          ``"exact"`` (no SVGP twin of ``MixedSingleTaskGP`` exists).
+        """
+        if gp_model_type not in {"exact", "variational", "auto"}:
+            raise ValueError(
+                f"gp_model_type must be 'exact', 'variational', or 'auto'; "
+                f"got {gp_model_type!r}."
+            )
+
+        if gp_model_type == "auto":
+            resolved = (
+                "variational"
+                if (N >= _SVGP_AUTO_THRESHOLD and not has_categorical)
+                else "exact"
+            )
+            if resolved == "variational":
+                logger.info(
+                    "gp_model_type='auto' resolved to 'variational' "
+                    "(N=%d ≥ %d, no categorical dims).",
+                    N, _SVGP_AUTO_THRESHOLD,
+                )
+            return resolved
+
+        if gp_model_type == "variational":
+            if not _HAS_SVGP:
+                logger.warning(
+                    "gp_model_type='variational' requested but "
+                    "SingleTaskVariationalGP is unavailable in this BoTorch "
+                    "install — falling back to 'exact'."
+                )
+                return "exact"
+            if has_categorical:
+                logger.warning(
+                    "gp_model_type='variational' requested but task declared "
+                    "categorical dims; MixedSingleTaskGP has no SVGP twin — "
+                    "falling back to 'exact' (MixedSingleTaskGP)."
+                )
+                return "exact"
+        return gp_model_type
+
+    def _build_variational_gp(
+        self,
+        K: int,
+        N: int,
+        num_inducing_points: Optional[int],
+        kernel_type: str,
+    ) -> None:
+        """Construct a ``SingleTaskVariationalGP`` and park it on ``self.model``."""
+        if not _HAS_SVGP:  # pragma: no cover — already guarded in _resolve_
+            raise RuntimeError("SingleTaskVariationalGP unavailable.")
+
+        # Resolve inducing count.  Hard-capped at N so we never pick more
+        # inducing points than we have training data.
+        m = (
+            int(num_inducing_points)
+            if num_inducing_points is not None
+            else min(N, _SVGP_DEFAULT_INDUCING)
+        )
+        m = max(1, min(m, N))
+        self.num_inducing_points = m
+
+        if kernel_type == "matern":
+            covar_module = ScaleKernel(
+                MaternKernel(nu=2.5, ard_num_dims=K)
+            )
+        elif kernel_type == "spectral_mixture":
+            # SpectralMixture + VariationalELBO has documented instability;
+            # warn and fall back to a matern kernel for the SVGP path.
+            logger.warning(
+                "SpectralMixtureKernel + variational GP is unstable; "
+                "using Matern 2.5 instead for the SVGP path."
+            )
+            covar_module = ScaleKernel(
+                MaternKernel(nu=2.5, ard_num_dims=K)
+            )
+        else:
+            raise ValueError(
+                f"Unknown kernel_type '{kernel_type}'. "
+                "Choose 'matern' or 'spectral_mixture'."
+            )
+
+        # Subsample m rows from train_X as initial inducing locations.
+        if m < N:
+            idx = torch.randperm(N, device=self.device)[:m]
+            inducing_points = self.train_X[idx].clone()
+        else:
+            inducing_points = self.train_X.clone()
+
+        self.model = SingleTaskVariationalGP(
+            train_X=self.train_X,
+            train_Y=self.train_Y,
+            inducing_points=inducing_points,
+            covar_module=covar_module,
+            learn_inducing_points=True,
+        ).to(self.device)
+        logger.info(
+            "Using SingleTaskVariationalGP (m=%d inducing points, N=%d, K=%d).",
+            m, N, K,
+        )
+
+    def _fit_variational(self, epochs: int, lr: float) -> None:
+        """Train the SVGP via Adam + VariationalELBO (full-batch)."""
+        if self.model is None or self.train_Y is None or self.train_X is None:
+            raise RuntimeError("Variational GP is not initialised.")
+        assert VariationalELBO is not None  # narrowed by _HAS_SVGP
+
+        # BoTorch's SingleTaskVariationalGP wraps the actual ApproximateGP at
+        # ``.model`` and the likelihood at ``.likelihood`` — VariationalELBO
+        # binds to that inner pair.
+        inner_gp = self.model.model
+        likelihood = self.model.likelihood
+        self.mll = VariationalELBO(
+            likelihood, inner_gp, num_data=self.train_X.shape[0],
+        ).to(self.device)
+
+        optimizer = torch.optim.Adam(
+            [{"params": self.model.parameters()}], lr=lr,
+        )
+
+        # Flatten train_Y to (N,) — that is what VariationalELBO expects
+        # for single-output regression.
+        y_flat = self.train_Y.squeeze(-1)
+
+        self.model.train()
+        likelihood.train()
+        logger.info(
+            "Fitting SVGP via Adam (epochs=%d, lr=%.1e)...", epochs, lr,
+        )
+        last_loss = float("nan")
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            output = inner_gp(self.train_X)
+            loss = -self.mll(output, y_flat)
+            loss.backward()
+            optimizer.step()
+            last_loss = float(loss.item())
+            if epoch == 0 or (epoch + 1) % max(epochs // 4, 1) == 0:
+                logger.info(
+                    "  SVGP epoch %4d/%d  ELBO=%.4f", epoch + 1, epochs, -last_loss,
+                )
+        self.model.eval()
+        likelihood.eval()
+        logger.info("SVGP training done. Final ELBO=%.4f", -last_loss)

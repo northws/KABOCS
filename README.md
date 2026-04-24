@@ -91,10 +91,11 @@ python webui/run_webui.py    # 打开 http://127.0.0.1:8000
 | 能力 | CLI 标志 | 说明 |
 |---|---|---|
 | **多目标 BO (qNEHVI)** | `--multi-objective --objectives CO H2 --ref-point 0 5` | `ModelListGP`（每个目标一条 GP）+ `qNoisyExpectedHypervolumeImprovement` 采集，内置 Task 预设（`TestTask`: y/y2；`CO2RRTask`: CO 最大化 vs HER 最小化）；运行结束写 `pareto_front.csv` + `pareto_front.png`，`ObjectiveSpec(direction="min")` 自动符号翻转 |
+| **稀疏 / 变分 GP (SVGP)** | `--gp-model auto` (默认) / `variational` / `exact` · `--num-inducing-points 100` | 大数据集场景切 BoTorch `SingleTaskVariationalGP`，Adam + `VariationalELBO` 训练，O(N·m²) 替代 ExactGP 的 O(N³)。`auto` 在 N ≥ 200 且无类别维时自动升档；类别任务或小数据自动留在 ExactGP。采集函数（UCB/qNEI/qNEHVI）无需改造 |
 | 声明式配置文件 | `--config run.yaml` | 支持 YAML / TOML / JSON；CLI 显式标志优先级高于配置文件，见 `configs/` 样例 |
 | 批量推荐 q>1 | `--q-batch 3` | 每轮给出多个连续候选，qNEI 走联合优化、UCB 走 sequential-greedy 退化，全部进入 Top-N 排序 |
 | 早停/收敛检测 | `--max-stagnation 3 --stagnation-tol 1e-3` | 最佳产率连续 N 轮无 >tol 改进自动终止，`run_metadata.json` 记录 `stopped_early` / `stop_reason` |
-| 自动化测试 | `pytest -q` | 59+ 测试覆盖归一化、特征选择、CandidateRecord、Task 注册、CLI、YAML 合并、**MO 帕累托/参考点**、TestTask 端到端 smoke；`.github/workflows/ci.yml` 已接入 |
+| 自动化测试 | `pytest -q` | 62+ 测试覆盖归一化、特征选择、CandidateRecord、Task 注册、CLI、YAML 合并、**MO 帕累托/参考点**、**SVGP e2e**、TestTask 端到端 smoke；`.github/workflows/ci.yml` 已接入 |
 | 打包与工程化 | `pyproject.toml` | 标准化元数据 + pytest / coverage / ruff 配置；`pip install -e .[dev]` 一键安装开发依赖 |
 | 模块重构 | — | CLI 交互助手（`prompt_user_*` / `print_*`）拆至 `kabo/interaction.py`，`kabo/acquisition.py` 回归到采集函数纯数学层，全部向后兼容 |
 | 懒加载 | — | `kabo/__init__.py` 采用 PEP 562 按需解析，`kabo.utils` 的 `torch` 变为函数体内导入；无 torch 环境也能跑轻量测试与配置校验 |
@@ -137,6 +138,33 @@ class OERTask(TaskBase):
             ObjectiveSpec("O2_faradaic_efficiency", direction="max"),
             ObjectiveSpec("overpotential_mV",       direction="min"),
         ]
+```
+
+### 稀疏 / 变分 GP (SVGP) 机制
+
+**背景**：精确 GP 的 Cholesky 分解复杂度 O(N³)。~25 行数据毫无压力，200+ 行开始让单轮 BO 进入数秒-分钟级别，500+ 行就不再实用。SVGP 通过 m 个可学习的诱导点近似完整后验，把训练从 O(N³) 降到 **O(N·m² + m³)**（默认 m=100 时即使 N=5000 也只需不到一秒）。
+
+- **后端**：BoTorch `SingleTaskVariationalGP`（底层 `ApproximateGP` + `CholeskyVariationalDistribution`），ARD Matérn 2.5 协方差
+- **训练**：`VariationalELBO` + Adam 手动 loop（`--svgp-epochs 200 --svgp-lr 1e-2`，全批）；比 `fit_gpytorch_mll` 对 SVGP 的 dispatch 更稳定跨版本
+- **诱导点**：默认 `min(N, 100)` 随机子采样 `train_X` 作为初始位置，`learn_inducing_points=True` 让 Adam 同时优化位置 + 变分参数
+- **自动路由**（`--gp-model auto`，默认）：
+  - N ≥ 200 **且** 无类别维 → `variational`
+  - 否则 / 类别任务 / `SingleTaskVariationalGP` 不可用 → `exact`
+- **采集函数无感**：SVGP 实现了标准 `posterior()`，UCB / qNEI / qNEHVI / KABO 组合采集全部直接复用；多目标路径（每个目标一条 `SurrogateModel`）同样自动继承
+- **审计字段**：`run_metadata.json` 追加 `gp_model_type`（用户请求）+ `gp_model_type_resolved`（实际使用）+ `num_inducing_points` + `svgp_epochs` + `svgp_lr`
+
+```bash
+# 示例 4：在 500+ 行数据集上强制变分 GP
+python -m kabo --task co2rr --gp-model variational \
+               --num-inducing-points 150 --svgp-epochs 300 \
+               --iterations 20
+
+# 示例 5：小数据也强制走 SVGP（诊断 / 对比用）
+python -m kabo --task test --gp-model variational \
+               --num-inducing-points 5 --svgp-epochs 50 \
+               --non-interactive --iterations 2 --seed 42 \
+               --data data/test_data.csv --candidates none \
+               --skip-feature-selection
 ```
 
 ---

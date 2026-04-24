@@ -90,6 +90,10 @@ class KABOEngine:
         lambda_k: float = 1.0,
         lambda_v: float = 0.0,
         discrete_strategy: str = "acq",
+        gp_model_type: str = "auto",
+        num_inducing_points: Optional[int] = None,
+        svgp_epochs: int = 200,
+        svgp_lr: float = 1e-2,
     ) -> None:
         self.device = device
         self.kernel_type = kernel_type
@@ -102,6 +106,16 @@ class KABOEngine:
         self.lambda_p = float(lambda_p)
         self.lambda_k = float(lambda_k)
         self.lambda_v = float(lambda_v)
+
+        # v1.2: GP backend selection ("exact" / "variational" / "auto").
+        # Resolution happens per-fit inside ``SurrogateModel`` so that the
+        # "auto" heuristic can observe the actual N each round.
+        self.gp_model_type = str(gp_model_type)
+        self.num_inducing_points = (
+            None if num_inducing_points is None else int(num_inducing_points)
+        )
+        self.svgp_epochs = int(svgp_epochs)
+        self.svgp_lr = float(svgp_lr)
 
         # P3 of discrete variables proposal: how to rank candidate pool.
         # ``"acq"``     — score every candidate with the acquisition function
@@ -196,6 +210,10 @@ class KABOEngine:
             design_bounds=design_bounds,
             kernel_type=self.kernel_type,
             feature_types=feature_types,
+            gp_model_type=self.gp_model_type,
+            num_inducing_points=self.num_inducing_points,
+            svgp_epochs=self.svgp_epochs,
+            svgp_lr=self.svgp_lr,
         )
 
     # ------------------------------------------------------------------
@@ -238,6 +256,10 @@ class KABOEngine:
             design_bounds=design_bounds,
             kernel_type=self.kernel_type,
             feature_types=feature_types,
+            gp_model_type=self.gp_model_type,
+            num_inducing_points=self.num_inducing_points,
+            svgp_epochs=self.svgp_epochs,
+            svgp_lr=self.svgp_lr,
         )
 
     def build_mo_acquisition(
