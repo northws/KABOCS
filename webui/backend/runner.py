@@ -223,50 +223,155 @@ class SessionRunner:
 
 
 # ---------------------------------------------------------------------------
-# Session manager (single active run at a time)
+# Session manager (registry keyed by run_id — v1.2)
 # ---------------------------------------------------------------------------
+# The legacy design kept a single ``_current`` slot.  v1.2 promotes this to
+# an **ordered registry** keyed by ``run_id`` so multiple sessions can be
+# tracked simultaneously (status queries, abort-by-id, SSE fan-out).  For
+# backward compatibility the ``current`` property still returns "the most
+# recently started session that is still running or pending"; when all
+# active runs have finished, it returns the most recent terminal one so
+# the existing ``/api/runs/current/*`` endpoints keep working.
+#
+# Concurrency note: the global ``EventHub`` still owns a single
+# ``WebUIBridge`` at a time — making events truly multi-tenant requires a
+# deeper refactor of the interaction layer.  The ``allow_concurrent``
+# knob is therefore opt-in and primarily useful for non-interactive runs.
+_MAX_REGISTRY_SIZE = 64
+# Active-status set: treated as "not finished" for listing / current.
+_ACTIVE_STATES: frozenset[str] = frozenset({"pending", "running"})
+
+
 class SessionManager:
-    """Keeps a reference to the single active optimisation run."""
+    """Thread-safe registry of ``SessionRunner`` instances (one per run_id)."""
 
     def __init__(self, hub: EventHub):
         self.hub = hub
-        self._current: Optional[SessionRunner] = None
+        # OrderedDict so "most recent" semantics fall out naturally.
+        from collections import OrderedDict as _OrderedDict
+        self._sessions: _OrderedDict[str, SessionRunner] = _OrderedDict()
         self._lock = threading.Lock()
 
     # --------------------------------------------------------------
     @property
     def current(self) -> Optional[SessionRunner]:
-        return self._current
+        """Most recently started active session, or the most recent
+        terminal one when no session is active.  Never raises."""
+        with self._lock:
+            return self._pick_current_locked()
+
+    def _pick_current_locked(self) -> Optional[SessionRunner]:
+        if not self._sessions:
+            return None
+        # Prefer active runs (status in _ACTIVE_STATES); else fall back to
+        # the most recently inserted session.
+        for runner in reversed(self._sessions.values()):
+            if runner.status in _ACTIVE_STATES:
+                return runner
+        return next(reversed(self._sessions.values()))
 
     # --------------------------------------------------------------
-    def start(self, config: RunConfig) -> SessionRunner:
+    def start(
+        self,
+        config: RunConfig,
+        allow_concurrent: bool = False,
+    ) -> SessionRunner:
+        """Create, register, and start a new ``SessionRunner``.
+
+        Parameters
+        ----------
+        config : RunConfig
+            Run parameters.
+        allow_concurrent : bool, optional
+            When False (default, legacy behaviour) this raises
+            ``RuntimeError`` if another run is already active.  When
+            True, multiple active sessions can coexist in the registry
+            — the caller is responsible for ensuring the interaction
+            layer can cope (non-interactive runs are always safe).
+        """
         with self._lock:
-            if self._current is not None and self._current.status == "running":
+            active = [
+                r for r in self._sessions.values()
+                if r.status in _ACTIVE_STATES
+            ]
+            if active and not allow_concurrent:
                 raise RuntimeError(
-                    "A run is already active. Stop it before starting a new one."
+                    "A run is already active. Stop it before starting a new one, "
+                    "or pass allow_concurrent=True."
                 )
             run_id = _new_run_id()
             output_dir = RUNS_ROOT / run_id
             runner = SessionRunner(
-                run_id=run_id, config=config, output_dir=output_dir, hub=self.hub,
+                run_id=run_id, config=config,
+                output_dir=output_dir, hub=self.hub,
             )
-            self._current = runner
+            self._sessions[run_id] = runner
+            # Bound registry size — drop oldest *terminal* entries first.
+            self._evict_old_terminal_locked()
             runner.start()
             return runner
 
     # --------------------------------------------------------------
-    def abort(self) -> bool:
-        runner = self._current
+    def get(self, run_id: str) -> Optional[SessionRunner]:
+        """Return the session with this id or ``None``."""
+        with self._lock:
+            return self._sessions.get(run_id)
+
+    def list(self) -> list[SessionRunner]:
+        """All sessions currently in the registry, oldest first."""
+        with self._lock:
+            return list(self._sessions.values())
+
+    def list_snapshots(self) -> list[dict[str, Any]]:
+        """Convenience wrapper returning ``runner.snapshot()`` for every entry."""
+        return [r.snapshot() for r in self.list()]
+
+    # --------------------------------------------------------------
+    def abort(self, run_id: Optional[str] = None) -> bool:
+        """Abort a session (``run_id=None`` → current).  Returns True on hit."""
+        if run_id is None:
+            runner = self.current
+        else:
+            runner = self.get(run_id)
         if runner is None:
             return False
         runner.abort()
         return True
 
     # --------------------------------------------------------------
+    def remove(self, run_id: str) -> bool:
+        """Drop a session from the registry.  Silently ignores unknown
+        ids and refuses to remove active runs."""
+        with self._lock:
+            r = self._sessions.get(run_id)
+            if r is None:
+                return False
+            if r.status in _ACTIVE_STATES:
+                return False
+            del self._sessions[run_id]
+            return True
+
+    # --------------------------------------------------------------
     def clear_if_finished(self) -> None:
-        if self._current is not None and self._current.status not in ("running", "pending"):
-            # keep last finished run accessible via /api/runs/current as historical
-            pass
+        """No-op kept for backward compatibility with v1.1 callers."""
+        return None
+
+    # --------------------------------------------------------------
+    def _evict_old_terminal_locked(self) -> None:
+        """Drop the oldest terminal sessions so the registry stays bounded.
+
+        Active sessions (``pending`` / ``running``) are never evicted.
+        The registry is capped at :data:`_MAX_REGISTRY_SIZE` — when the
+        cap is exceeded, this method removes oldest terminal entries
+        until the cap is respected (or only active entries remain).
+        """
+        while len(self._sessions) > _MAX_REGISTRY_SIZE:
+            for key, runner in list(self._sessions.items()):
+                if runner.status not in _ACTIVE_STATES:
+                    del self._sessions[key]
+                    break
+            else:
+                break  # all remaining are active; stop evicting
 
 
 # ---------------------------------------------------------------------------

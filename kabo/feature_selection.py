@@ -1,21 +1,53 @@
 """
 Phase 1: Feature Weight Evaluation & Selection.
 
-Trains a Random Forest to evaluate nonlinear relationships between
-the descriptors declared by the active Task and the selected target
-product yield, then selects the top-K most important features.
+Trains a Random Forest (or one of several alternatives) to evaluate
+nonlinear relationships between the descriptors declared by the active
+Task and the selected target product yield, then selects the top-K most
+important features.
+
+Supported ranking methods (v1.2):
+
+* ``"random_forest"`` — legacy default; tree-based Gini importance.
+* ``"permutation"``   — permutation importance on a fit RF; robust
+                        baseline that is less biased toward high-cardinality
+                        features.
+* ``"mutual_info"``   — model-free; estimates I(X_j; y) with k-NN density
+                        (sklearn's ``mutual_info_regression``).
+* ``"shap"``          — TreeSHAP mean |φ_j| over the training set;
+                        requires the optional ``shap`` package.
+
+An optional correlation heatmap (Pearson) of the available descriptor
+columns is also written so domain experts can spot multicollinearity
+(e.g. catalyst-weight vs metal-loading) before the surrogate is fit.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.feature_selection import mutual_info_regression
+from sklearn.inspection import permutation_importance
+
+try:
+    import shap as _shap
+    _HAS_SHAP = True
+except ImportError:  # pragma: no cover — optional dep
+    _shap = None  # type: ignore
+    _HAS_SHAP = False
 
 from kabo.utils import get_logger
+
+
+FSMethod = Literal["random_forest", "permutation", "mutual_info", "shap"]
+VALID_FS_METHODS: tuple[FSMethod, ...] = (
+    "random_forest", "permutation", "mutual_info", "shap",
+)
 
 logger = get_logger(__name__)
 
@@ -178,6 +210,215 @@ def train_random_forest(
         logger.info("  %-35s  %.4f", feat, imp)
 
     return rf, importances, available_features
+
+
+def rank_features(
+    df: pd.DataFrame,
+    target_column: str,
+    all_feature_columns: list[str],
+    method: FSMethod = "random_forest",
+    n_estimators: int = 200,
+    random_state: int = 42,
+    permutation_repeats: int = 5,
+    mutual_info_n_neighbors: int = 3,
+) -> tuple[pd.Series, list[str]]:
+    """Unified feature-ranking entry point.
+
+    Delegates to the requested backend and always returns a pandas
+    ``Series`` sorted in descending order of importance — the same
+    shape ``train_random_forest`` has historically returned — so
+    downstream code (``select_top_k_features``,
+    ``plot_feature_importances``) works unchanged.
+
+    Parameters
+    ----------
+    df, target_column, all_feature_columns, n_estimators, random_state
+        Same semantics as ``train_random_forest``.
+    method : one of ``VALID_FS_METHODS``
+        Ranking backend.  ``"random_forest"`` reproduces the legacy
+        Gini-importance path bit-for-bit.
+    permutation_repeats : int, optional
+        Number of random shuffles per feature for ``"permutation"``
+        (default 5 — cheap).  Ignored for other methods.
+    mutual_info_n_neighbors : int, optional
+        ``n_neighbors`` for the k-NN density estimator in
+        ``mutual_info_regression`` (default 3).  Ignored elsewhere.
+
+    Returns
+    -------
+    tuple[pd.Series, list[str]]
+        ``(sorted_importances, available_features)``.
+
+    Raises
+    ------
+    ValueError
+        Unknown ``method``.
+    RuntimeError
+        ``"shap"`` requested but the ``shap`` package is not installed.
+    """
+    if method not in VALID_FS_METHODS:
+        raise ValueError(
+            f"Unknown feature-selection method '{method}'. "
+            f"Valid choices: {VALID_FS_METHODS}"
+        )
+
+    if method == "random_forest":
+        _, importances, available = train_random_forest(
+            df, target_column=target_column,
+            all_feature_columns=all_feature_columns,
+            n_estimators=n_estimators, random_state=random_state,
+        )
+        return importances, available
+
+    available = [c for c in all_feature_columns if c in df.columns]
+    if not available:
+        raise ValueError(
+            "No recognised descriptor columns in the dataset; "
+            "cannot rank features."
+        )
+    X = df[available].to_numpy(dtype=np.float64)
+    y = df[target_column].to_numpy(dtype=np.float64)
+
+    if method == "permutation":
+        # Fit a shallow RF first; permutation_importance needs a fitted
+        # estimator.  The shallow depth keeps wall-clock sane on small N.
+        n_rows = len(df)
+        if n_rows < 10:
+            logger.warning(
+                "Small dataset (n=%d): reducing n_estimators for the "
+                "permutation-importance RF.", n_rows,
+            )
+            trees = max(50, n_estimators // 4)
+        else:
+            trees = n_estimators
+        rf = RandomForestRegressor(
+            n_estimators=trees, random_state=random_state, n_jobs=-1,
+        ).fit(X, y)
+        result = permutation_importance(
+            rf, X, y, n_repeats=permutation_repeats,
+            random_state=random_state, n_jobs=-1,
+        )
+        scores = np.asarray(result.importances_mean, dtype=np.float64)
+        # Permutation importance can produce small negatives on truly
+        # noise features; clip to 0 so the downstream bar plot stays
+        # sensible without losing ordering information.
+        scores = np.clip(scores, a_min=0.0, a_max=None)
+
+    elif method == "mutual_info":
+        n_neighbors = max(1, min(mutual_info_n_neighbors, len(df) - 1))
+        scores = mutual_info_regression(
+            X, y, n_neighbors=n_neighbors, random_state=random_state,
+        )
+        scores = np.asarray(scores, dtype=np.float64)
+
+    elif method == "shap":
+        if not _HAS_SHAP:
+            raise RuntimeError(
+                "method='shap' requires the optional `shap` package. "
+                "Install with `pip install shap`."
+            )
+        rf = RandomForestRegressor(
+            n_estimators=n_estimators, random_state=random_state, n_jobs=-1,
+        ).fit(X, y)
+        explainer = _shap.TreeExplainer(rf)
+        shap_values = explainer.shap_values(X)
+        scores = np.mean(np.abs(shap_values), axis=0)
+        scores = np.asarray(scores, dtype=np.float64)
+
+    else:  # pragma: no cover — unreachable thanks to the guard above
+        raise ValueError(f"Unhandled method '{method}'")
+
+    importances = pd.Series(
+        scores, index=available, name=f"{method}_importance",
+    ).sort_values(ascending=False)
+    logger.info(
+        "Feature ranking method '%s' computed for %d descriptors.",
+        method, len(available),
+    )
+    return importances, available
+
+
+def plot_correlation_heatmap(
+    df: pd.DataFrame,
+    feature_columns: list[str],
+    output_dir: Path,
+    title_suffix: str = "",
+    method: str = "pearson",
+) -> Optional[Path]:
+    """Save a Pearson correlation heatmap for available descriptors.
+
+    Helps spot multicollinearity before the GP surrogate is fit
+    (two tightly correlated features inflate the ARD length-scale
+    search and slow fitting).  Silently skips and returns ``None``
+    when fewer than two descriptors are present.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Dataset.
+    feature_columns : list[str]
+        Columns to include; unknown columns are dropped with a warning.
+    output_dir : Path
+        Destination dir (created if missing).
+    title_suffix : str, optional
+        Extra text appended to the plot title (e.g. task / target name).
+    method : {"pearson", "spearman", "kendall"}, optional
+        Correlation method forwarded to ``pd.DataFrame.corr`` (default
+        ``"pearson"``).
+
+    Returns
+    -------
+    Path or None
+        Path to the saved PNG, or ``None`` when skipped.
+    """
+    available = [c for c in feature_columns if c in df.columns]
+    missing = [c for c in feature_columns if c not in df.columns]
+    if missing:
+        logger.warning(
+            "Correlation heatmap: skipping %d missing columns: %s",
+            len(missing), missing,
+        )
+    if len(available) < 2:
+        logger.info(
+            "Correlation heatmap: only %d usable column(s); skipping.",
+            len(available),
+        )
+        return None
+
+    corr = df[available].corr(method=method)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "correlation_heatmap.png"
+
+    n = len(available)
+    fig, ax = plt.subplots(figsize=(max(6, n * 0.35), max(5, n * 0.3)))
+    im = ax.imshow(corr.values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(corr.columns, rotation=60, ha="right", fontsize=7)
+    ax.set_yticklabels(corr.index, fontsize=7)
+    # Cell annotations — only when matrix is small enough to remain readable.
+    if n <= 25:
+        for i in range(n):
+            for j in range(n):
+                v = corr.values[i, j]
+                ax.text(
+                    j, i, f"{v:.2f}",
+                    ha="center", va="center",
+                    fontsize=6,
+                    color="white" if abs(v) > 0.5 else "black",
+                )
+    title = f"Feature correlation ({method})"
+    if title_suffix:
+        title += f"  — {title_suffix}"
+    ax.set_title(title, fontsize=11)
+    fig.colorbar(im, ax=ax, fraction=0.035, pad=0.04, label="corr")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Correlation heatmap saved to %s", out_path)
+    return out_path
 
 
 def select_top_k_features(

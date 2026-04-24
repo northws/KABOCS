@@ -92,10 +92,14 @@ python webui/run_webui.py    # 打开 http://127.0.0.1:8000
 |---|---|---|
 | **多目标 BO (qNEHVI)** | `--multi-objective --objectives CO H2 --ref-point 0 5` | `ModelListGP`（每个目标一条 GP）+ `qNoisyExpectedHypervolumeImprovement` 采集，内置 Task 预设（`TestTask`: y/y2；`CO2RRTask`: CO 最大化 vs HER 最小化）；运行结束写 `pareto_front.csv` + `pareto_front.png`，`ObjectiveSpec(direction="min")` 自动符号翻转 |
 | **稀疏 / 变分 GP (SVGP)** | `--gp-model auto` (默认) / `variational` / `exact` · `--num-inducing-points 100` | 大数据集场景切 BoTorch `SingleTaskVariationalGP`，Adam + `VariationalELBO` 训练，O(N·m²) 替代 ExactGP 的 O(N³)。`auto` 在 N ≥ 200 且无类别维时自动升档；类别任务或小数据自动留在 ExactGP。采集函数（UCB/qNEI/qNEHVI）无需改造 |
+| **ExpertPrior 分布扩展** | `--expert-prior-file priors/my_prior.json` | 新增 Beta（浓度/比例）、Log-Normal（正值偏斜）、Categorical（类别特征）分布，支持多先验组合与可微 log-score 评估 |
+| **特征选择扩展** | `--fs-method rf` (默认) / `permutation` / `mutual_info` / `shap` · `--permutation-repeats 10` · `--mi-neighbors 3` · `--correlation-heatmap` | 新增排列重要性、互信息、SHAP 值三种特征排序方法；可选生成特征相关性热力图 `correlation_heatmap.png` |
+| **PE 查询向量化** | `--pe-pool-cap 50` · `--pe-strategy variance` (默认) / `random` | 候选池上限控制避免 O(n²) 穷举，支持随机策略冷启动；全向量化实现提升大候选池性能 |
+| **WebUI 多会话** | API: `allow_concurrent=true` | SessionManager 改为按 `run_id` 键控的注册表，支持多并发 BO 运行；新增 `/api/sessions/*` 端点管理会话列表、查询、中止 |
 | 声明式配置文件 | `--config run.yaml` | 支持 YAML / TOML / JSON；CLI 显式标志优先级高于配置文件，见 `configs/` 样例 |
 | 批量推荐 q>1 | `--q-batch 3` | 每轮给出多个连续候选，qNEI 走联合优化、UCB 走 sequential-greedy 退化，全部进入 Top-N 排序 |
 | 早停/收敛检测 | `--max-stagnation 3 --stagnation-tol 1e-3` | 最佳产率连续 N 轮无 >tol 改进自动终止，`run_metadata.json` 记录 `stopped_early` / `stop_reason` |
-| 自动化测试 | `pytest -q` | 62+ 测试覆盖归一化、特征选择、CandidateRecord、Task 注册、CLI、YAML 合并、**MO 帕累托/参考点**、**SVGP e2e**、TestTask 端到端 smoke；`.github/workflows/ci.yml` 已接入 |
+| 自动化测试 | `pytest -q` | 80+ 测试覆盖归一化、特征选择、CandidateRecord、Task 注册、CLI、YAML 合并、**MO 帕累托/参考点**、**SVGP e2e**、**ExpertPrior 分布**、**特征选择扩展**、**PE 查询向量化**、**SessionManager 多会话**、TestTask 端到端 smoke；`.github/workflows/ci.yml` 已接入 |
 | 打包与工程化 | `pyproject.toml` | 标准化元数据 + pytest / coverage / ruff 配置；`pip install -e .[dev]` 一键安装开发依赖 |
 | 模块重构 | — | CLI 交互助手（`prompt_user_*` / `print_*`）拆至 `kabo/interaction.py`，`kabo/acquisition.py` 回归到采集函数纯数学层，全部向后兼容 |
 | 懒加载 | — | `kabo/__init__.py` 采用 PEP 562 按需解析，`kabo.utils` 的 `torch` 变为函数体内导入；无 torch 环境也能跑轻量测试与配置校验 |
@@ -166,6 +170,97 @@ python -m kabo --task test --gp-model variational \
                --data data/test_data.csv --candidates none \
                --skip-feature-selection
 ```
+
+### ExpertPrior 分布扩展机制
+
+**背景**：原 `ExpertPrior` 仅支持 Gaussian 和 Uniform 分布，无法覆盖浓度/比例参数（Beta）、正值偏斜量（Log-Normal）、类别特征（Categorical）等常见场景。
+
+- **新增分布**：
+  - **Beta**：适用于浓度、比例等 [0,1] 有界参数，支持 `alpha`、`beta` 形状参数
+  - **Log-Normal**：适用于正值偏斜分布（如催化活性、反应速率），支持 `mu`、`sigma` 参数
+  - **Categorical**：适用于类别特征（如催化剂类型、溶剂种类），支持 `probs` 概率向量
+- **多先验组合**：单个 JSON 文件可定义多个先验分量，自动按特征名匹配并叠加 log-score
+- **可微评分**：所有分布实现可微 log-score，支持梯度优化；验证失败时抛出 `ValueError`
+- **配置验证**：加载时自动检查参数合法性（如 Beta 的 alpha/beta > 0，Categorical 的 probs 归一化）
+
+**JSON 配置示例**：
+
+```json
+{
+  "priors": [
+    {
+      "feature": "catalyst_loading",
+      "type": "beta",
+      "alpha": 2.0,
+      "beta": 5.0
+    },
+    {
+      "feature": "reaction_rate",
+      "type": "lognormal",
+      "mu": 0.0,
+      "sigma": 1.0
+    },
+    {
+      "feature": "solvent_type",
+      "type": "categorical",
+      "categories": ["water", "acetonitrile", "dmf"],
+      "probs": [0.5, 0.3, 0.2]
+    }
+  ]
+}
+```
+
+### 特征选择扩展机制
+
+**背景**：原特征选择仅使用 Random Forest 重要性排序，是工程启发式而非统计推断。
+
+- **新增排序方法**：
+  - **排列重要性**（`--fs-method permutation`）：基于验证集性能下降排序，更稳健但计算较慢；`--permutation-repeats` 控制重复次数
+  - **互信息**（`--fs-method mutual_info`）：基于信息论的非线性依赖度量；`--mi-neighbors` 控制近邻数
+  - **SHAP 值**（`--fs-method shap`）：基于博弈论的一致性解释，需要 `shap` 可选依赖
+- **相关性热力图**：`--correlation-heatmap` 生成 `correlation_heatmap.png`，可视化特征间 Pearson 相关性矩阵，帮助识别多重共线性
+- **统一接口**：所有方法通过 `rank_features()` 统一接口返回排序后的特征列表，保持向后兼容
+
+```bash
+# 示例 6：使用 SHAP 特征选择 + 相关性热力图
+python -m kabo --task co2rr --fs-method shap \
+               --correlation-heatmap --iterations 20
+```
+
+### PE 查询向量化机制
+
+**背景**：原 `generate_pe_queries` 使用 O(n²) Python 循环穷举候选对，在大候选池时性能瓶颈明显。
+
+- **向量化实现**：使用 PyTorch 张量操作替代 Python 循环，大幅提升大候选池性能
+- **池上限控制**：`--pe-pool-cap` 限制候选池大小（默认 50），避免 O(n²) 复杂度爆炸
+- **策略选项**：
+  - **variance**（默认）：基于 GP 后验方差 + 均值差排序，预热后使用
+  - **random**：纯随机采样，适用于冷启动或探索阶段
+- **参数验证**：`pe_pool_cap` 必须 ≥ 2，`pe_strategy` 必须为有效选项
+
+```bash
+# 示例 7：PE 查询使用随机策略 + 池上限
+python -m kabo --task co2rr --kabo-mode \
+               --pe-strategy random --pe-pool-cap 30 \
+               --expert-prior-file priors/my_prior.json --iterations 20
+```
+
+### WebUI 多会话机制
+
+**背景**：原 `SessionManager` 为全局单例，仅支持单用户单会话，无法同时运行多个 BO 任务。
+
+- **注册表架构**：`SessionManager` 改为按 `run_id` 键控的字典注册表，支持多并发会话
+- **并发控制**：`POST /api/runs` 新增 `allow_concurrent` 参数，设为 `true` 时允许多会话并行
+- **会话管理 API**：
+  - `GET /api/sessions`：列出所有活跃会话
+  - `GET /api/sessions/{run_id}`：获取特定会话详情
+  - `POST /api/sessions/{run_id}/answer`：提交 PE 答案
+  - `POST /api/sessions/{run_id}/abort`：中止会话
+  - `DELETE /api/sessions/{run_id}`：移除会话
+- **向后兼容**：保留 `/api/runs/current/*` 端点，单会话模式仍可用
+- **自动清理**：终端会话在达到 `max_terminal_sessions`（默认 10）时自动清理最旧的记录
+
+**审计字段**：`run_metadata.json` 追踪 `session_id` 和 `allow_concurrent` 标志。
 
 ---
 

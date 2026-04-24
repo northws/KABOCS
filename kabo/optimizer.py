@@ -53,7 +53,9 @@ from kabo.engine import KABOEngine
 from kabo.task import CO2RRTask, TaskBase
 from kabo.feature_selection import (
     load_and_validate_data,
+    plot_correlation_heatmap,
     plot_feature_importances,
+    rank_features,
     select_top_k_features,
     train_random_forest,
 )
@@ -167,6 +169,10 @@ class KABOOptimizer:
         raw_samples: int = 256,
         rf_n_estimators: int = 200,
         skip_feature_selection: bool = False,
+        feature_selection_method: str = "random_forest",
+        correlation_heatmap: bool = True,
+        permutation_repeats: int = 5,
+        mutual_info_n_neighbors: int = 3,
         strict_training_schema: bool = False,
         pre_fill_before_choice: bool = False,
         seed: Optional[int] = None,
@@ -178,6 +184,8 @@ class KABOOptimizer:
         expert_prior_file: Optional[str | Path] = None,
         diversity_weight: float = 0.5,
         pe_budget: int = 0,
+        pe_pool_cap: Optional[int] = None,
+        pe_strategy: str = "uncertainty",
         lambda_v: float = 0.0,
         generate_candidates_n: int = 1000,
         prefer_file_candidates: bool = False,
@@ -213,6 +221,21 @@ class KABOOptimizer:
         self.raw_samples = raw_samples
         self.rf_n_estimators = rf_n_estimators
         self.skip_feature_selection = skip_feature_selection
+        # v1.2: feature-ranking backend selector + optional correlation heatmap.
+        from kabo.feature_selection import VALID_FS_METHODS as _VALID_FS
+        self.feature_selection_method = str(feature_selection_method).lower()
+        if self.feature_selection_method not in _VALID_FS:
+            raise ValueError(
+                f"Unknown feature_selection_method="
+                f"'{feature_selection_method}'. Valid: {_VALID_FS}"
+            )
+        self.correlation_heatmap = bool(correlation_heatmap)
+        self.permutation_repeats = int(permutation_repeats)
+        self.mutual_info_n_neighbors = int(mutual_info_n_neighbors)
+        if self.permutation_repeats <= 0:
+            raise ValueError("permutation_repeats must be a positive integer.")
+        if self.mutual_info_n_neighbors <= 0:
+            raise ValueError("mutual_info_n_neighbors must be a positive integer.")
         self.strict_training_schema = strict_training_schema
         self.pre_fill_before_choice = pre_fill_before_choice
         self.seed = seed
@@ -225,6 +248,18 @@ class KABOOptimizer:
         self.expert_prior_file = expert_prior_file
         self.diversity_weight = diversity_weight
         self.pe_budget = pe_budget
+        # v1.2 — #11: PE query pool cap + scoring strategy.
+        if pe_pool_cap is not None and int(pe_pool_cap) <= 0:
+            raise ValueError("pe_pool_cap must be a positive integer.")
+        self.pe_pool_cap = (
+            None if pe_pool_cap is None else int(pe_pool_cap)
+        )
+        self.pe_strategy = str(pe_strategy).lower()
+        if self.pe_strategy not in {"uncertainty", "random"}:
+            raise ValueError(
+                f"Unsupported pe_strategy='{pe_strategy}'. "
+                "Use 'uncertainty' or 'random'."
+            )
         self.lambda_v = lambda_v
         # P2: dynamic candidate pool controls
         self.generate_candidates_n = int(generate_candidates_n)
@@ -511,8 +546,19 @@ class KABOOptimizer:
             c for c in self.task.feature_columns() if c in self.df.columns
         ]
 
+        # Always attempt the correlation heatmap — it's independent of the
+        # ranking backend and cheap.  Helps spot multicollinearity before
+        # any BO starts.  Disable with ``correlation_heatmap=False``.
+        if self.correlation_heatmap:
+            plot_correlation_heatmap(
+                self.df,
+                feature_columns=available_features,
+                output_dir=self.output_dir,
+                title_suffix=self.task.task_name(),
+            )
+
         if self.skip_feature_selection:
-            # P1-1: Skip RF, use all available features
+            # P1-1: Skip ranking, use all available features
             self.selected_features = available_features
             logger.info(
                 "Feature selection SKIPPED. Using all %d available features.",
@@ -521,12 +567,18 @@ class KABOOptimizer:
             for i, feat in enumerate(self.selected_features, 1):
                 logger.info("  [%2d] %s", i, feat)
         else:
-            _, importances, _ = train_random_forest(
+            logger.info(
+                "Ranking features via method='%s'.", self.feature_selection_method,
+            )
+            importances, _ = rank_features(
                 self.df,
                 target_column=self.target_column,
                 all_feature_columns=self.task.feature_columns(),
+                method=self.feature_selection_method,  # type: ignore[arg-type]
                 n_estimators=self.rf_n_estimators,
                 random_state=self.seed if self.seed is not None else 42,
+                permutation_repeats=self.permutation_repeats,
+                mutual_info_n_neighbors=self.mutual_info_n_neighbors,
             )
             self.feature_importances = importances
 
@@ -746,7 +798,11 @@ class KABOOptimizer:
 
             if len(pe_pool) >= 2 and self.pe_budget > 0:
                 pe_queries = self.engine.generate_pe_queries(
-                    pe_pool, n_queries=self.pe_budget
+                    pe_pool,
+                    n_queries=self.pe_budget,
+                    max_pool_size=self.pe_pool_cap,
+                    strategy=self.pe_strategy,
+                    random_state=self.seed,
                 )
                 for q_idx, (a, b) in enumerate(pe_queries, 1):
                     cand_a = pe_pool[a]
@@ -1421,6 +1477,11 @@ class KABOOptimizer:
             "n_iterations": n_iterations,
             "interactive": interactive,
             "skip_feature_selection": self.skip_feature_selection,
+            # v1.2 — #10 audit
+            "feature_selection_method": self.feature_selection_method,
+            "correlation_heatmap": self.correlation_heatmap,
+            "permutation_repeats": self.permutation_repeats,
+            "mutual_info_n_neighbors": self.mutual_info_n_neighbors,
             "strict_training_schema": self.strict_training_schema,
             "pre_fill_before_choice": self.pre_fill_before_choice,
             "seed": self.seed,
@@ -1429,6 +1490,8 @@ class KABOOptimizer:
             "kabo_mode": self.kabo_mode,
             "tie_count": self._tie_count,
             "pe_budget": self.pe_budget,
+            "pe_pool_cap": self.pe_pool_cap,
+            "pe_strategy": self.pe_strategy,
             "lambda_v": self.lambda_v,
             "lambda_p": self.lambda_p if self.kabo_mode else None,
             "lambda_k": self.lambda_k if self.kabo_mode else None,

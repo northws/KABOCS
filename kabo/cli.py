@@ -159,6 +159,44 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--fs-method",
+        choices=["random_forest", "permutation", "mutual_info", "shap"],
+        default="random_forest",
+        dest="feature_selection_method",
+        help=(
+            "Feature-ranking backend.  'random_forest' (legacy default) "
+            "uses Gini importance; 'permutation' uses "
+            "sklearn.inspection.permutation_importance on a fit RF; "
+            "'mutual_info' uses sklearn's MI-regression; 'shap' uses "
+            "TreeSHAP mean |phi| (requires optional `shap` package)."
+        ),
+    )
+    parser.add_argument(
+        "--permutation-repeats", type=int, default=5,
+        help=(
+            "Number of random shuffles per feature for "
+            "--fs-method permutation (default 5)."
+        ),
+    )
+    parser.add_argument(
+        "--mutual-info-n-neighbors", type=int, default=3,
+        help=(
+            "n_neighbors for the k-NN density estimator used by "
+            "--fs-method mutual_info (default 3)."
+        ),
+    )
+    heatmap_group = parser.add_mutually_exclusive_group()
+    heatmap_group.add_argument(
+        "--correlation-heatmap", dest="correlation_heatmap",
+        action="store_true", default=True,
+        help="Emit a Pearson correlation heatmap of descriptors (default).",
+    )
+    heatmap_group.add_argument(
+        "--no-correlation-heatmap", dest="correlation_heatmap",
+        action="store_false",
+        help="Suppress the correlation heatmap artifact.",
+    )
+    parser.add_argument(
         "--strict-training-schema", action="store_true",
         help=(
             "Require every task-declared descriptor column in training "
@@ -207,6 +245,24 @@ Examples:
         help=(
             "Number of preference exploration queries per iteration "
             "(KABO mode; 0=disabled; default: 0)"
+        ),
+    )
+    parser.add_argument(
+        "--pe-pool-cap", type=int, default=None,
+        help=(
+            "Optional cap on the PE query candidate pool: when the pool "
+            "exceeds this, a uniform random subsample is used for pair "
+            "scoring (O(m^2) → O(cap^2)). Default: no cap."
+        ),
+    )
+    parser.add_argument(
+        "--pe-strategy",
+        choices=["uncertainty", "random"],
+        default="uncertainty",
+        help=(
+            "PE pair scoring strategy: 'uncertainty' (PEBO; var_i + var_j "
+            "− |μ_i − μ_j|) or 'random' (distinct uniform pairs, useful "
+            "for ablation and cold-start parity). Default: uncertainty."
         ),
     )
     parser.add_argument(
@@ -421,6 +477,10 @@ def main() -> None:
         h2_penalty_weight=args.h2_penalty_weight,
         candidates_path=candidates_path,
         skip_feature_selection=args.skip_feature_selection,
+        feature_selection_method=args.feature_selection_method,
+        correlation_heatmap=args.correlation_heatmap,
+        permutation_repeats=args.permutation_repeats,
+        mutual_info_n_neighbors=args.mutual_info_n_neighbors,
         strict_training_schema=args.strict_training_schema,
         pre_fill_before_choice=args.pre_fill_before_choice,
         seed=args.seed,
@@ -432,6 +492,8 @@ def main() -> None:
         expert_prior_file=args.expert_prior_file,
         diversity_weight=args.diversity_weight,
         pe_budget=args.pe_budget,
+        pe_pool_cap=args.pe_pool_cap,
+        pe_strategy=args.pe_strategy,
         lambda_v=args.lambda_v,
         generate_candidates_n=args.generate_candidates_n,
         prefer_file_candidates=args.prefer_file_candidates,

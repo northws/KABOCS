@@ -364,10 +364,22 @@ class KABOEngine:
         self,
         candidates_norm: list[torch.Tensor],
         n_queries: int,
+        max_pool_size: Optional[int] = None,
+        strategy: str = "uncertainty",
+        random_state: Optional[int] = None,
     ) -> list[tuple[int, int]]:
-        """Delegate to ``PreferenceModel.generate_pe_queries``."""
+        """Delegate to ``PreferenceModel.generate_pe_queries``.
+
+        See :meth:`kabo.preference.PreferenceModel.generate_pe_queries` for
+        the full parameter docs (``max_pool_size``, ``strategy``,
+        ``random_state``) introduced in v1.2.
+        """
         return self.preference_model.generate_pe_queries(
-            candidates_norm, n_queries=n_queries,
+            candidates_norm,
+            n_queries=n_queries,
+            max_pool_size=max_pool_size,
+            strategy=strategy,
+            random_state=random_state,
         )
 
     # ------------------------------------------------------------------

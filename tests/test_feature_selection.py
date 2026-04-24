@@ -14,8 +14,11 @@ import pandas as pd
 import pytest
 
 from kabo.feature_selection import (
+    VALID_FS_METHODS,
     load_and_validate_data,
+    plot_correlation_heatmap,
     plot_feature_importances,
+    rank_features,
     select_top_k_features,
     train_random_forest,
 )
@@ -173,3 +176,140 @@ class TestPlotFeatureImportances:
         assert out.exists()
         assert out.suffix == ".png"
         assert out.stat().st_size > 100  # non-empty file
+
+
+# ---------------------------------------------------------------------------
+# v1.2 — rank_features unified entry point
+# ---------------------------------------------------------------------------
+class TestRankFeatures:
+    def test_random_forest_matches_legacy_path(self, synthetic_df: pd.DataFrame):
+        """method='random_forest' must match train_random_forest exactly."""
+        imp_new, avail_new = rank_features(
+            synthetic_df,
+            target_column="y",
+            all_feature_columns=["x1", "x2", "x3"],
+            method="random_forest",
+            n_estimators=100,
+            random_state=0,
+        )
+        _, imp_old, avail_old = train_random_forest(
+            synthetic_df,
+            target_column="y",
+            all_feature_columns=["x1", "x2", "x3"],
+            n_estimators=100,
+            random_state=0,
+        )
+        assert avail_new == avail_old
+        pd.testing.assert_series_equal(
+            imp_new.rename(None), imp_old.rename(None), check_names=False,
+        )
+
+    def test_permutation_promotes_dominant_feature(self, synthetic_df: pd.DataFrame):
+        imp, _ = rank_features(
+            synthetic_df,
+            target_column="y",
+            all_feature_columns=["x1", "x2", "x3"],
+            method="permutation",
+            n_estimators=100,
+            random_state=0,
+            permutation_repeats=3,
+        )
+        # x2 carries 2x the weight of x1 and 20x of x3 — must land top-2.
+        assert "x2" in imp.index[:2].tolist()
+        # All importances must be >= 0 after clipping.
+        assert (imp >= 0).all()
+
+    def test_mutual_info_returns_nonneg_and_ranks(self, synthetic_df: pd.DataFrame):
+        imp, available = rank_features(
+            synthetic_df,
+            target_column="y",
+            all_feature_columns=["x1", "x2", "x3"],
+            method="mutual_info",
+            random_state=0,
+            mutual_info_n_neighbors=3,
+        )
+        assert set(available) == {"x1", "x2", "x3"}
+        # Mutual information is always non-negative.
+        assert (imp >= 0).all()
+        # Descending order.
+        assert list(imp) == sorted(imp.tolist(), reverse=True)
+
+    def test_unknown_method_raises(self, synthetic_df: pd.DataFrame):
+        with pytest.raises(ValueError, match="Unknown feature-selection"):
+            rank_features(
+                synthetic_df,
+                target_column="y",
+                all_feature_columns=["x1", "x2", "x3"],
+                method="deep_kernel",  # type: ignore[arg-type]
+            )
+
+    def test_shap_optional_dep(self, synthetic_df: pd.DataFrame):
+        """'shap' must either succeed or fail with a clear RuntimeError."""
+        from kabo.feature_selection import _HAS_SHAP
+
+        if _HAS_SHAP:
+            imp, _ = rank_features(
+                synthetic_df,
+                target_column="y",
+                all_feature_columns=["x1", "x2", "x3"],
+                method="shap",
+                n_estimators=50,
+                random_state=0,
+            )
+            assert len(imp) == 3
+            assert (imp >= 0).all()
+            assert "x2" in imp.index[:2].tolist()
+        else:
+            with pytest.raises(RuntimeError, match="shap"):
+                rank_features(
+                    synthetic_df,
+                    target_column="y",
+                    all_feature_columns=["x1", "x2", "x3"],
+                    method="shap",
+                    n_estimators=50,
+                    random_state=0,
+                )
+
+    def test_valid_fs_methods_is_tuple_of_known(self):
+        assert set(VALID_FS_METHODS) == {
+            "random_forest", "permutation", "mutual_info", "shap",
+        }
+
+
+# ---------------------------------------------------------------------------
+# v1.2 — correlation heatmap
+# ---------------------------------------------------------------------------
+class TestCorrelationHeatmap:
+    def test_writes_png_for_multi_column_df(
+        self, tmp_path: Path, synthetic_df: pd.DataFrame,
+    ):
+        out = plot_correlation_heatmap(
+            synthetic_df,
+            feature_columns=["x1", "x2", "x3"],
+            output_dir=tmp_path,
+            title_suffix="synthetic",
+        )
+        assert out is not None
+        assert out.exists()
+        assert out.suffix == ".png"
+        assert out.stat().st_size > 100
+
+    def test_skips_when_only_one_column(self, tmp_path: Path):
+        df = pd.DataFrame({"x1": [0.1, 0.2, 0.3]})
+        out = plot_correlation_heatmap(
+            df,
+            feature_columns=["x1"],
+            output_dir=tmp_path,
+        )
+        assert out is None
+
+    def test_handles_missing_columns_gracefully(
+        self, tmp_path: Path, synthetic_df: pd.DataFrame,
+    ):
+        # x_extra does not exist — should be silently dropped.
+        out = plot_correlation_heatmap(
+            synthetic_df,
+            feature_columns=["x1", "x2", "x_extra"],
+            output_dir=tmp_path,
+        )
+        assert out is not None and out.exists()

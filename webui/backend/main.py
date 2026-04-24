@@ -357,10 +357,21 @@ async def delete_prior_file(name: str) -> dict:
 # Run control
 # ---------------------------------------------------------------------------
 @app.post("/api/runs", response_model=StatusResponse)
-async def start_run(req: StartRunRequest) -> StatusResponse:
+async def start_run(
+    req: StartRunRequest,
+    allow_concurrent: bool = False,
+) -> StatusResponse:
+    """Start a new BO run.
+
+    Pass ``?allow_concurrent=true`` (v1.2) to allow starting a new run
+    while an older one is still running.  The default is single-active
+    to preserve v1.1 semantics — concurrent runs share the global
+    interaction bridge, so callers are expected to keep them in
+    ``--non-interactive`` mode.
+    """
     cfg = RunConfig(**req.model_dump())
     try:
-        runner = sessions.start(cfg)
+        runner = sessions.start(cfg, allow_concurrent=allow_concurrent)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc))
     return StatusResponse(
@@ -405,6 +416,71 @@ async def abort_run() -> dict:
     ok = sessions.abort()
     if not ok:
         raise HTTPException(404, "No active run")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Multi-session registry (v1.2) — id-addressed run management
+# ---------------------------------------------------------------------------
+# These endpoints expose the same sessions that ``/api/runs/current`` sees,
+# but addressed by ``run_id`` so the UI can track multiple concurrent
+# (non-interactive) runs.  Historical, on-disk archives remain under the
+# legacy ``/api/runs/{run_id}`` read-only endpoints.
+@app.get("/api/sessions")
+async def list_sessions() -> dict:
+    """Live session registry (not archived runs on disk)."""
+    return {"sessions": sessions.list_snapshots()}
+
+
+@app.get("/api/sessions/{run_id}", response_model=StatusResponse)
+async def get_session(run_id: str) -> StatusResponse:
+    runner = sessions.get(run_id)
+    if runner is None:
+        raise HTTPException(404, "Session not found")
+    snap = runner.snapshot()
+    return StatusResponse(
+        status=snap["status"],
+        run_id=snap["run_id"],
+        pending_prompt=snap.get("pending_prompt"),
+        error=snap.get("error"),
+    )
+
+
+@app.post("/api/sessions/{run_id}/answer")
+async def submit_session_answer(run_id: str, req: AnswerRequest) -> dict:
+    runner = sessions.get(run_id)
+    if runner is None:
+        raise HTTPException(404, "Session not found")
+    pending = runner.bridge.get_pending_prompt()
+    if pending is None:
+        raise HTTPException(409, "No prompt awaiting answer")
+    accepted = runner.bridge.submit_answer(
+        req.model_dump(exclude_none=True),
+        prompt_id=req.prompt_id,
+    )
+    if not accepted:
+        raise HTTPException(409, "Answer rejected (stale prompt_id)")
+    return {"ok": True}
+
+
+@app.post("/api/sessions/{run_id}/abort")
+async def abort_session(run_id: str) -> dict:
+    ok = sessions.abort(run_id)
+    if not ok:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
+
+
+@app.delete("/api/sessions/{run_id}")
+async def remove_session(run_id: str) -> dict:
+    """Drop a terminal session from the live registry (does NOT delete
+    the archived run directory — use ``DELETE /api/runs/{run_id}`` for that)."""
+    removed = sessions.remove(run_id)
+    if not removed:
+        raise HTTPException(
+            409,
+            "Session cannot be removed (not found or still active)",
+        )
     return {"ok": True}
 
 
