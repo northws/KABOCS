@@ -21,12 +21,22 @@ from __future__ import annotations
 
 import argparse
 
-from kabo.optimizer import KABOOptimizer
+from kabo.config import load_config_file, merge_config_into_args
 from kabo.task import TASK_REGISTRY, get_task
 
+# NOTE: ``kabo.optimizer`` pulls torch / botorch at import time, so the
+# heavy import is deferred into ``main()``.  This keeps ``build_parser``
+# and ``parse_args`` importable in torch-free environments (unit tests,
+# documentation builds, the WebUI project-editor validator).
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the KABO CLI argument parser.
+
+    Exposed as a free function so that downstream tooling (e.g. the
+    WebUI project-editor CLI helper, config-file merge tests) can
+    reuse the same definitions without re-parsing ``sys.argv``.
+    """
     registered_tasks = ", ".join(sorted(TASK_REGISTRY.keys()))
 
     parser = argparse.ArgumentParser(
@@ -48,6 +58,14 @@ Examples:
   python -m kabo --top-k 8 --beta 3.0               # Custom params
   python run.py --candidates data/candidates.csv     # With discrete candidates
         """,
+    )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help=(
+            "Path to a YAML / TOML / JSON configuration file.  Values from "
+            "this file override argparse defaults but are themselves "
+            "overridden by any flag explicitly passed on the command line."
+        ),
     )
     parser.add_argument(
         "--task", type=str, default="co2rr",
@@ -235,12 +253,66 @@ Examples:
             "recommended when the pool is large (e.g. dynamic generator)."
         ),
     )
-    return parser.parse_args()
+    # ------------------------------------------------------------------ #
+    #  v1.2 additions: batch recommendation + early stopping
+    # ------------------------------------------------------------------ #
+    parser.add_argument(
+        "--q-batch", type=int, default=1,
+        help=(
+            "Number of continuous candidates to propose per iteration "
+            "(default 1). q>1 uses joint batch optimization (qNEI) or "
+            "sequential-greedy restarts (UCB); all candidates compete "
+            "against the discrete pool in the Top-N ranking."
+        ),
+    )
+    parser.add_argument(
+        "--max-stagnation", type=int, default=0,
+        help=(
+            "Stop the BO loop early when the best target value has not "
+            "improved by more than --stagnation-tol for N consecutive "
+            "iterations.  0 (default) disables early stopping."
+        ),
+    )
+    parser.add_argument(
+        "--stagnation-tol", type=float, default=1e-4,
+        help=(
+            "Absolute improvement threshold used by --max-stagnation "
+            "(default 1e-4)."
+        ),
+    )
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments, merging in an optional ``--config``.
+
+    Parameters
+    ----------
+    argv : list[str] or None
+        Argument vector to parse; ``None`` means ``sys.argv[1:]``.
+
+    Returns
+    -------
+    argparse.Namespace
+        Final namespace after optional config-file merge.
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if getattr(args, "config", None):
+        cfg = load_config_file(args.config)
+        args = merge_config_into_args(args, parser, cfg)
+    return args
 
 
 def main() -> None:
     """Main entry point for the KABO optimization pipeline."""
+    # parse_args() is torch-free and handles ``--help`` / ``--version`` by
+    # itself, so we defer the heavy optimizer import until *after* argument
+    # parsing succeeds.  This makes ``python -m kabo --help`` usable in
+    # torch-free environments (e.g. from the WebUI config editor).
     args = parse_args()
+    from kabo.optimizer import KABOOptimizer  # noqa: E402 — intentional late import
 
     task = get_task(args.task)
     # Let the task choose the default target when user did not specify.
@@ -286,6 +358,9 @@ def main() -> None:
         generate_candidates_n=args.generate_candidates_n,
         prefer_file_candidates=args.prefer_file_candidates,
         discrete_strategy=args.discrete_strategy,
+        q_batch=args.q_batch,
+        max_stagnation=args.max_stagnation,
+        stagnation_tol=args.stagnation_tol,
     )
 
     optimizer.run(

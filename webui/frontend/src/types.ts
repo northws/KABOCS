@@ -15,6 +15,43 @@ export interface TaskSchema {
   all_product_columns: string[];
   product_names: Record<string, string>;
   default_target: string;
+  /** "builtin" for hard-coded Python tasks, "project" for editable JSON projects. */
+  source?: "builtin" | "project";
+}
+
+// ---------------------------------------------------------------------------
+// Declarative project (dynamic TaskBase definition)
+// ---------------------------------------------------------------------------
+export interface FeatureSpec {
+  name: string;
+  type: "continuous" | "integer";
+  lo: number;
+  hi: number;
+  unit?: string | null;
+  display_name?: string | null;
+}
+
+export interface TargetSpec {
+  short_name: string;
+  column: string;
+  display_name?: string | null;
+  unit?: string | null;
+  is_competing: boolean;
+}
+
+export interface ProjectSpec {
+  name: string;
+  display_name: string;
+  description: string;
+  features: FeatureSpec[];
+  targets: TargetSpec[];
+  default_target: string;
+  notes: string;
+}
+
+export interface ProjectsListResponse {
+  projects: ProjectSpec[];
+  builtins: string[];
 }
 
 export interface RunConfig {

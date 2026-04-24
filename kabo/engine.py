@@ -292,6 +292,42 @@ class KABOEngine:
             bounds_raw=self.surrogate.bounds_raw,
         )
 
+    def suggest_continuous_batch(
+        self,
+        acq_func,
+        dim: int,
+        q: int,
+    ) -> list[tuple[torch.Tensor, float]]:
+        """Propose ``q`` diverse continuous candidates in one call.
+
+        Thin wrapper around :func:`kabo.acquisition.optimize_continuous_batch`
+        that injects the engine's integer-dim / bounds context.  For
+        ``q == 1`` the behaviour is identical to ``suggest_continuous``.
+
+        Parameters
+        ----------
+        acq_func
+            Acquisition function built via :meth:`build_acquisition`.
+        dim : int
+            Selected-feature dimensionality.
+        q : int
+            Batch size to request.  Must be >= 1.
+
+        Returns
+        -------
+        list[tuple[torch.Tensor, float]]
+            ``[(candidate_norm, acq_value), ...]`` of length ``q``.
+        """
+        # Late import to avoid a circular dependency at module load.
+        from kabo.acquisition import optimize_continuous_batch
+
+        return optimize_continuous_batch(
+            acq_func, dim, q, self.device,
+            self.n_restarts, self.raw_samples,
+            integer_indices=self.surrogate.integer_indices,
+            bounds_raw=self.surrogate.bounds_raw,
+        )
+
     def evaluate_discrete(
         self,
         acq_func,

@@ -1,0 +1,23 @@
+# --------------------------------------------------------------------------- #
+# KABOCS · Minimal TestTask smoke configuration
+# --------------------------------------------------------------------------- #
+# Use-case: CI smoke test & "hello world" demonstration.  Runs two BO
+# iterations over a 3-feature synthetic task with no interaction.
+#
+#   python -m kabo --config configs/testtask_smoke.yaml --non-interactive
+# --------------------------------------------------------------------------- #
+
+task: test
+data: data/test_data.csv
+candidates: none               # skip discrete pool
+iterations: 2
+top_k: 3
+skip_feature_selection: true
+seed: 42
+
+acq_strategy: ucb
+beta: 2.0
+beta_schedule: fixed
+
+device: cpu
+output_dir: output/smoke

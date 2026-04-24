@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------- #
+  # Fast lane — pure-Python tests (no torch).  Covers utils, candidate,
+  # feature_selection, task registry, config merge, CLI parser.
+  # Runs in <30 s and fails first on any regression.
+  # ---------------------------------------------------------------------- #
+  unit-tests:
+    name: unit-tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install light dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Only install what's actually needed for the torch-free test tier.
+          pip install numpy pandas scikit-learn matplotlib pyyaml pytest pytest-cov
+
+      - name: Verify lazy imports still hold (no torch in sys.modules)
+        run: |
+          python -c "
+          import sys
+          import kabo  # triggers kabo/__init__.py lazy stub
+          import kabo.utils, kabo.candidate, kabo.feature_selection, kabo.task, kabo.config, kabo.cli
+          assert 'torch' not in sys.modules, (
+              'Regression: torch was eagerly imported; see kabo/utils.py + kabo/__init__.py'
+          )
+          print('OK: torch not imported; kabo sub-modules import cleanly.')
+          "
+
+      - name: Run fast test tier
+        run: pytest -q --no-header
+
+  # ---------------------------------------------------------------------- #
+  # Full lane — torch / botorch integration tests on a single matrix cell.
+  # Decoupled from the fast lane so a missing-feature failure in the heavy
+  # stack doesn't block quick iteration on pure-Python code.
+  # ---------------------------------------------------------------------- #
+  integration-tests:
+    name: integration-tests (torch stack)
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install full dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pyyaml
+
+      - name: Run full test suite with coverage
+        run: pytest --cov=kabo --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------- #
+  # Lint — ruff, style only, does not gate merges.
+  # ---------------------------------------------------------------------- #
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff check (soft — informational only)
+        run: ruff check kabo tests || true

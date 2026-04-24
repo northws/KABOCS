@@ -182,6 +182,9 @@ class KABOOptimizer:
         generate_candidates_n: int = 1000,
         prefer_file_candidates: bool = False,
         discrete_strategy: str = "acq",
+        q_batch: int = 1,
+        max_stagnation: int = 0,
+        stagnation_tol: float = 1e-4,
     ) -> None:
         # Domain layer: default to CO2RR task for backward compatibility.
         self.task: TaskBase = task if task is not None else CO2RRTask()
@@ -220,6 +223,24 @@ class KABOOptimizer:
         self.prefer_file_candidates = bool(prefer_file_candidates)
         # P3: discrete candidate ranking strategy ("acq" or "thompson")
         self.discrete_strategy = str(discrete_strategy).lower()
+        # v1.2: batch recommendation size (q > 1 proposes multiple continuous
+        # candidates per iteration; enables parallel experimentation).
+        self.q_batch = int(q_batch)
+        if self.q_batch < 1:
+            raise ValueError(f"q_batch must be >= 1 (got {self.q_batch}).")
+        # v1.2: early-stopping controls.  max_stagnation=0 disables the check.
+        self.max_stagnation = int(max_stagnation)
+        if self.max_stagnation < 0:
+            raise ValueError(
+                f"max_stagnation must be >= 0 (got {self.max_stagnation}); "
+                "use 0 to disable early stopping."
+            )
+        self.stagnation_tol = float(stagnation_tol)
+        if not (np.isfinite(self.stagnation_tol) and self.stagnation_tol >= 0.0):
+            raise ValueError(
+                f"stagnation_tol must be a finite non-negative number "
+                f"(got {self.stagnation_tol})."
+            )
 
         if self.kabo_mode:
             logger.info(
@@ -608,6 +629,21 @@ class KABOOptimizer:
         self._beta_trace = []
         self._tie_count = 0
 
+        # ---- v1.2: early-stopping bookkeeping -------------------------------
+        # _best_so_far is seeded from the existing dataset (if any) so that a
+        # warm-start that already contains a strong observation isn't immediately
+        # considered "new best".
+        if (
+            self.target_column in self.df.columns
+            and not self.df[self.target_column].dropna().empty
+        ):
+            self._best_so_far: float = float(self.df[self.target_column].max())
+        else:
+            self._best_so_far = float("-inf")
+        self._stagnation_count: int = 0
+        self._stopped_early: bool = False
+        self._stop_reason: str = ""
+
         for iteration in range(1, n_iterations + 1):
             logger.info("-" * 50)
             logger.info("BO Iteration %d / %d", iteration, n_iterations)
@@ -684,14 +720,32 @@ class KABOOptimizer:
 
             acq_func = self.engine.build_acquisition(beta=beta_t)
 
-            # 2. Optimize over continuous [0,1]^K
-            cont_cand, cont_val = self.engine.suggest_continuous(acq_func, K)
+            # 2. Optimize over continuous [0,1]^K — single or batch
+            if self.q_batch > 1:
+                batch = self.engine.suggest_continuous_batch(
+                    acq_func, K, q=self.q_batch,
+                )
+                logger.info(
+                    "Requested q=%d continuous candidates; received %d.",
+                    self.q_batch, len(batch),
+                )
+            else:
+                batch = [self.engine.suggest_continuous(acq_func, K)]
 
             # 3. Collect all candidates
-            all_candidates: list[torch.Tensor] = [cont_cand]
-            all_acq_values: list[float] = [cont_val]
-            all_sources: list[str] = ["continuous"]
-            all_orig_rows: list[int] = [-1]  # -1 = no original row
+            all_candidates: list[torch.Tensor] = []
+            all_acq_values: list[float] = []
+            all_sources: list[str] = []
+            all_orig_rows: list[int] = []
+            for i, (c, v) in enumerate(batch):
+                all_candidates.append(c)
+                all_acq_values.append(v)
+                # Preserve legacy "continuous" label for q=1 to stay
+                # backward-compatible with existing regression fixtures.
+                all_sources.append(
+                    "continuous" if self.q_batch == 1 else f"continuous_{i + 1}"
+                )
+                all_orig_rows.append(-1)
 
             if self._discrete_candidates_df is not None:
                 disc_results = self.engine.evaluate_discrete(
@@ -960,6 +1014,39 @@ class KABOOptimizer:
 
             self.phase2_fit_surrogate()
 
+            # ---- v1.2: early-stopping check ---------------------------------
+            if self.max_stagnation > 0:
+                latest = product_yields.get(self.target_column, np.nan)
+                if pd.notna(latest):
+                    latest_f = float(latest)
+                    if latest_f > self._best_so_far + self.stagnation_tol:
+                        logger.info(
+                            "Early-stop: new best %.4f > previous %.4f (tol=%.2e); "
+                            "stagnation counter reset.",
+                            latest_f, self._best_so_far, self.stagnation_tol,
+                        )
+                        self._best_so_far = latest_f
+                        self._stagnation_count = 0
+                    else:
+                        self._stagnation_count += 1
+                        logger.info(
+                            "Early-stop: no improvement (best=%.4f, latest=%.4f); "
+                            "stagnation %d / %d.",
+                            self._best_so_far, latest_f,
+                            self._stagnation_count, self.max_stagnation,
+                        )
+                        if self._stagnation_count >= self.max_stagnation:
+                            self._stopped_early = True
+                            self._stop_reason = (
+                                f"stagnation >= max_stagnation "
+                                f"({self._stagnation_count} >= {self.max_stagnation})"
+                            )
+                            logger.info(
+                                "Early-stop TRIGGERED after iter %d: %s",
+                                iteration, self._stop_reason,
+                            )
+                            break
+
         print_best_found(
             self.df, self.selected_features, self.target_column,
             all_product_columns=self.task.all_product_columns(),
@@ -1089,6 +1176,17 @@ class KABOOptimizer:
             "generate_candidates_n": self.generate_candidates_n,
             "prefer_file_candidates": self.prefer_file_candidates,
             "feature_types": self.task.feature_types(),
+            # v1.2 additions
+            "q_batch": self.q_batch,
+            "max_stagnation": self.max_stagnation,
+            "stagnation_tol": self.stagnation_tol,
+            "stopped_early": bool(getattr(self, "_stopped_early", False)),
+            "stop_reason": getattr(self, "_stop_reason", ""),
+            "best_so_far": (
+                None
+                if getattr(self, "_best_so_far", float("-inf")) == float("-inf")
+                else float(self._best_so_far)
+            ),
             "n_rows_final": int(len(result_df)),
             "output_data": str(output_path),
         }

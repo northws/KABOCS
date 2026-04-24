@@ -10,11 +10,19 @@ from __future__ import annotations
 import logging
 import random
 import warnings
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import matplotlib
 import numpy as np
-import torch
+
+# ``torch`` is the heaviest optional dependency of the package.  Importing it
+# at module level would cost ~1s and would prevent lightweight consumers
+# (tests, documentation tools, the WebUI project-editor validator) from using
+# the pure-numpy helpers exposed here.  We therefore defer the import into
+# the exact functions that need it, and only expose the symbol for type
+# checkers via ``TYPE_CHECKING``.
+if TYPE_CHECKING:  # pragma: no cover
+    import torch
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -58,7 +66,7 @@ def get_logger(name: str) -> logging.Logger:
 # ---------------------------------------------------------------------------
 # Device selection
 # ---------------------------------------------------------------------------
-def select_device(device: str = "auto") -> torch.device:
+def select_device(device: str = "auto") -> "torch.device":
     """Select torch device.
 
     Parameters
@@ -71,6 +79,8 @@ def select_device(device: str = "auto") -> torch.device:
     -------
     torch.device
     """
+    import torch  # local import: see module header
+
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
@@ -84,6 +94,8 @@ def set_global_seed(seed: int) -> None:
     seed : int
         Seed used for Python, NumPy and Torch random generators.
     """
+    import torch  # local import: see module header
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -140,8 +152,8 @@ def normalize_x(
 
 
 def unnormalize_x(
-    x_norm: torch.Tensor,
-    bounds_raw: torch.Tensor,
+    x_norm: "torch.Tensor",
+    bounds_raw: "torch.Tensor",
 ) -> np.ndarray:
     """Convert normalized [0,1] features back to original scale.
 
@@ -208,10 +220,10 @@ def unstandardize_y(y_std_val: float, y_mean: float, y_std: float) -> float:
 # Integer / grid-snap helpers (P1 of discrete variables proposal)
 # ---------------------------------------------------------------------------
 def round_integer_dims_to_grid(
-    X_norm: torch.Tensor,
+    X_norm: "torch.Tensor",
     integer_indices: list[int],
-    bounds_raw: torch.Tensor,
-) -> torch.Tensor:
+    bounds_raw: "torch.Tensor",
+) -> "torch.Tensor":
     """Snap integer dims in normalized [0,1] space to their nearest
     valid integer-grid point.
 

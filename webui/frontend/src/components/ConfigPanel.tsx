@@ -29,6 +29,15 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
     }));
   }, [currentTask]);
 
+  const [builtinTasks, projectTasks] = useMemo(() => {
+    const b: TaskSchema[] = [];
+    const p: TaskSchema[] = [];
+    for (const t of tasks) (t.source === "project" ? p : b).push(t);
+    return [b, p];
+  }, [tasks]);
+
+  const isProjectTask = currentTask?.source === "project";
+
   return (
     <div className="space-y-6">
       {/* Group: Core ------------------------------------------------ */}
@@ -36,18 +45,38 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
         <Legend>Core</Legend>
 
         <Grid2>
-          <Field label="Task">
+          <Field
+            label="Task"
+            hint={
+              isProjectTask
+                ? "project definition — edit in the Projects tab"
+                : "built-in (Python-defined)"
+            }
+          >
             <select
               disabled={disabled}
               className={SELECT_CLS}
               value={config.task}
               onChange={(e) => onChange({ task: e.target.value })}
             >
-              {tasks.map((t) => (
-                <option key={t.name} value={t.name}>
-                  {t.display_name} ({t.name})
-                </option>
-              ))}
+              {builtinTasks.length > 0 && (
+                <optgroup label="Built-in">
+                  {builtinTasks.map((t) => (
+                    <option key={t.name} value={t.name}>
+                      {t.display_name} ({t.name})
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {projectTasks.length > 0 && (
+                <optgroup label="Projects">
+                  {projectTasks.map((t) => (
+                    <option key={t.name} value={t.name}>
+                      {t.display_name} ({t.name})
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </Field>
 
@@ -153,6 +182,31 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             </select>
           </Field>
         </Grid2>
+
+        {currentTask && (
+          <div
+            className={
+              "flex flex-wrap items-center gap-2 text-[11px] rounded border px-2.5 py-1.5 " +
+              (isProjectTask
+                ? "bg-indigo-50 border-indigo-200 text-indigo-900"
+                : "bg-slate-50 border-slate-200 text-slate-600")
+            }
+          >
+            <span className="font-semibold uppercase tracking-wide">
+              {isProjectTask ? "Project" : "Built-in"}
+            </span>
+            <span className="font-mono text-slate-500">
+              {currentTask.features.length} features
+            </span>
+            <span className="font-mono text-slate-500">
+              {currentTask.all_product_columns.length} products
+            </span>
+            <span className="text-slate-500">
+              default target →{" "}
+              <span className="font-mono">{currentTask.default_target}</span>
+            </span>
+          </div>
+        )}
 
         <div className="flex flex-wrap gap-3 text-sm pt-1">
           <Checkbox

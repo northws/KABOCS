@@ -7,6 +7,7 @@
 | 区域 | 说明 |
 |---|---|
 | **Run** | 配置任务参数并一键启动；实时查看日志、Top-N 候选、产率输入、手动覆盖等交互 |
+| **Projects** | 以声明式 JSON 新建 / 编辑 / 删除「优化项目」（CO2RR / ORR / OER / …），启动即动态注册为 `TaskBase` |
 | **Data** | 在浏览器里浏览/编辑/上传/下载 `data/` 目录下的 CSV |
 | **Priors** | 带 JSON 校验的专家先验编辑器（`priors/*.json`） |
 | **History** | 历次运行的元数据、特征重要性图、β 轨迹、更新后的 CSV 表格 |
@@ -139,6 +140,43 @@ npm run dev
 4. 日志、Top-N 推荐会实时出现在右侧。当后端需要输入时（选候选、填产率、选特征等），顶部 **Awaiting your input** 卡片会弹出相应表单。
 5. 迭代完成后，右侧出现 *Best experiment so far* 与 *Run completed* 提示；结果同步归档到 `output/runs/<run_id>/`。
 6. 去 **History** tab 审阅历史运行的元数据、特征重要性图、β 轨迹、`data_updated.csv` 等。
+
+## 项目编辑器（Projects tab）
+
+用于**不写 Python** 就声明一个新的 `TaskBase`。每个项目是 `projects/<name>.json` 里的一份声明，启动时被 `webui.backend.projects.register_all()` 扫描并动态合成为 `TaskBase` 子类注册进 `TASK_REGISTRY` —— 之后在 Run tab、CLI 的 `--task <name>` 都能直接选到（CLI 需要 `from webui.backend.projects import register_all; register_all()`）。
+
+### 工作流
+
+1. **Projects** tab → `+ New project`
+2. 填写：
+   - **name**（小写、唯一；与内建 task 冲突会被拒绝）
+   - **display_name** / **description** / **notes**（展示用）
+   - **features**：任意多行；每行有 `name` / `type` (`continuous` | `integer`) / `lo` / `hi` / 可选 `unit` / `display_name`
+   - **targets**：产物列；每行有 `short_name`（CO / OH / …）/ CSV 列名 / 可选 `display_name` / `unit` / `is_competing`
+   - **default_target**：从 `short_name` 下拉选一个
+3. **Create** / **Save** → 后端即时写入 `projects/<name>.json`，并覆盖/新增 `TASK_REGISTRY` 条目
+4. 切到 **Run**：动态项目会出现在 Task 下拉框的 *Projects* 分组里，旁边有项目/产物计数徽章
+
+### 字段到 `TaskBase` 的映射
+
+| JSON 字段 | 合成方法 |
+|---|---|
+| `name` | `task_name()` |
+| `features[].name` | `feature_columns()` |
+| `features[].type` | `feature_types()` (`continuous` / `integer`) |
+| `features[].{lo,hi}` | `design_space_bounds()` |
+| `targets[].{short_name,column}` | `target_columns()` / `product_names()` |
+| `targets[].is_competing` | 训练目标：`y = Y_target − h2_penalty_weight · Σ(Y_competing)` |
+| `default_target` | `default_target()` |
+
+`prompt_observation` 与 `simulate_observation` 使用默认实现：CLI 下逐个产物 `input()`；web 端自动被桥接成 *Product yields* 表单（零适配，因为 `ui_bridge.ask_product_yields` 只看 `task.target_columns()` / `task.product_names()`）。`generate_candidates` 自动提供 Sobol 连续维 + 均匀离散维，按 `feature_types()` 路由。
+
+### 安全护栏
+
+- 名字**不可**与内建 task（`co2rr` / `test`）冲突：创建时返回 409
+- 项目被**运行中**的 session 占用时，PUT / DELETE 会返回 409
+- 项目名不可在线重命名；改名 = 删除 + 新建（避免历史 run 的元数据溯源歧义）
+- JSON 在磁盘上可以手工编辑，下次启动会被重新校验；校验失败的文件被跳过并打 warning
 
 ## 已知限制 / 设计取舍
 

@@ -1,0 +1,39 @@
+# --------------------------------------------------------------------------- #
+# KABOCS · Canonical CO2RR base configuration
+# --------------------------------------------------------------------------- #
+# Run with:
+#   python -m kabo --config configs/co2rr_base.yaml
+#
+# Override any value on the CLI, e.g.
+#   python -m kabo --config configs/co2rr_base.yaml --seed 42 --iterations 20
+# --------------------------------------------------------------------------- #
+
+# ---- Core task ----
+task: co2rr
+target_product: CO
+data: data/data.csv
+candidates: data/candidates.csv
+
+# ---- Optimization loop ----
+iterations: 10
+top_k: 10
+seed: 42
+
+# ---- Surrogate / acquisition ----
+acq_strategy: ucb            # "ucb" | "qnei"
+kernel_type: matern          # "matern" | "spectral_mixture"
+beta: 2.0
+beta_schedule: fixed         # "fixed" | "theory" | "theory-strict"
+beta_delta: 0.1
+
+# ---- KABO expert-knowledge mode (off by default) ----
+kabo_mode: false
+lambda_p: 1.0
+lambda_k: 1.0
+lambda_v: 0.0
+pe_budget: 0
+diversity_weight: 0.5
+
+# ---- Runtime ----
+device: auto
+output_dir: output

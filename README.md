@@ -35,6 +35,7 @@
 
 - 配置任何注册的 Task、一键启动/停止贝叶斯优化运行
 - 完整人机交互循环（选候选点 / 手动覆盖 / 填产率 / 非选特征 / PE 成对比较）
+- **项目编辑器**：以声明式 JSON 新建 CO2RR / ORR / OER … 等「优化项目」，启动即动态注册为 `TaskBase`（无需写 Python）
 - 在浏览器里直接编辑 `data/*.csv` 与 `priors/*.json`
 - 历史运行仪表盘（元数据、特征重要性图、β 轨迹、更新后的数据集）
 
@@ -82,6 +83,26 @@ python webui/run_webui.py    # 打开 http://127.0.0.1:8000
 |---|---|---|
 | `CO2RRTask` | `kabo/task/co2rr.py` | 光催化 CO₂ 还原（19 特征 / 7 产物） |
 | `TestTask` | `kabo/task/test_task.py` | 3 特征 / 1 产物，端到端 smoke 测试 |
+
+---
+
+## v1.2 新增特性（2026-04）
+
+| 能力 | CLI 标志 | 说明 |
+|---|---|---|
+| 声明式配置文件 | `--config run.yaml` | 支持 YAML / TOML / JSON；CLI 显式标志优先级高于配置文件，见 `configs/` 样例 |
+| 批量推荐 q>1 | `--q-batch 3` | 每轮给出多个连续候选，qNEI 走联合优化、UCB 走 sequential-greedy 退化，全部进入 Top-N 排序 |
+| 早停/收敛检测 | `--max-stagnation 3 --stagnation-tol 1e-3` | 最佳产率连续 N 轮无 >tol 改进自动终止，`run_metadata.json` 记录 `stopped_early` / `stop_reason` |
+| 自动化测试 | `pytest -q` | 40+ 测试覆盖归一化、特征选择、CandidateRecord、Task 注册、CLI、YAML 合并、TestTask 端到端 smoke；`.github/workflows/ci.yml` 已接入 |
+| 打包与工程化 | `pyproject.toml` | 标准化元数据 + pytest / coverage / ruff 配置；`pip install -e .[dev]` 一键安装开发依赖 |
+| 模块重构 | — | CLI 交互助手（`prompt_user_*` / `print_*`）拆至 `kabo/interaction.py`，`kabo/acquisition.py` 回归到采集函数纯数学层，全部向后兼容 |
+| 懒加载 | — | `kabo/__init__.py` 采用 PEP 562 按需解析，`kabo.utils` 的 `torch` 变为函数体内导入；无 torch 环境也能跑轻量测试与配置校验 |
+
+```bash
+# 示例：YAML 一键运行 + 批量 q=3 + 3 轮无改进自动停止
+python -m kabo --config configs/co2rr_base.yaml \
+               --q-batch 3 --max-stagnation 3 --iterations 30
+```
 
 ---
 

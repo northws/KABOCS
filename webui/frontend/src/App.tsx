@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Beaker,
   Database,
+  FlaskConical,
   FolderKanban,
   History,
   Sparkles,
@@ -11,14 +12,16 @@ import {
 import RunPage from "./components/RunPage";
 import DataManager from "./components/DataManager";
 import PriorsManager from "./components/PriorsManager";
+import ProjectsManager from "./components/ProjectsManager";
 import Dashboard from "./components/Dashboard";
 import type { StatusResponse } from "./types";
 import { currentRunStatus } from "./api";
 
-type Tab = "run" | "data" | "priors" | "history";
+type Tab = "run" | "projects" | "data" | "priors" | "history";
 
 const TABS: Array<{ key: Tab; label: string; icon: React.ReactNode }> = [
   { key: "run", label: "Run", icon: <Sparkles className="w-4 h-4" /> },
+  { key: "projects", label: "Projects", icon: <FlaskConical className="w-4 h-4" /> },
   { key: "data", label: "Data", icon: <Database className="w-4 h-4" /> },
   { key: "priors", label: "Priors", icon: <FolderKanban className="w-4 h-4" /> },
   { key: "history", label: "History", icon: <History className="w-4 h-4" /> },
@@ -73,6 +76,7 @@ export default function App() {
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-6">
         {tab === "run" && <RunPage onStatusChange={setStatus} />}
+        {tab === "projects" && <ProjectsManager />}
         {tab === "data" && <DataManager />}
         {tab === "priors" && <PriorsManager />}
         {tab === "history" && <Dashboard />}

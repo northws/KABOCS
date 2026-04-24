@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 # Important: import the kabo package so task registry is populated.
 import kabo.task as _kabo_task  # noqa: F401
 
+from webui.backend import projects as _projects
 from webui.backend.event_hub import EventHub
 from webui.backend.runner import (
     RunConfig,
@@ -51,6 +52,11 @@ from webui.backend.schemas import (
     StartRunRequest,
     StatusResponse,
 )
+
+# Snapshot built-in task names before we register any dynamic projects so
+# CRUD endpoints can reliably detect collisions.
+_projects._snapshot_builtins()
+_projects.register_all()
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +110,7 @@ async def list_tasks() -> dict:
     """Return every registered task with its schema (features/bounds/products)."""
     from kabo.task import TASK_REGISTRY
 
+    dynamic = set(_projects.list_dynamic_names())
     tasks_out: list[dict] = []
     for name, cls in TASK_REGISTRY.items():
         inst = cls()
@@ -120,6 +127,7 @@ async def list_tasks() -> dict:
             "all_product_columns": inst.all_product_columns(),
             "product_names": inst.product_names(),
             "default_target": inst.default_target(),
+            "source": "project" if name in dynamic else "builtin",
         })
     return {"tasks": tasks_out}
 
@@ -142,6 +150,102 @@ async def get_task_schema(name: str) -> dict:
         "product_names": inst.product_names(),
         "default_target": inst.default_target(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Project (dynamic task) management
+# ---------------------------------------------------------------------------
+@app.get("/api/projects")
+async def list_projects() -> dict:
+    """List every declarative project (JSON-defined dynamic task)."""
+    return {
+        "projects": [s.model_dump() for s in _projects.list_specs()],
+        "builtins": sorted(_projects._BUILTIN_TASKS),
+    }
+
+
+@app.get("/api/projects/{name}")
+async def get_project(name: str) -> dict:
+    try:
+        spec = _projects.load_spec(name)
+    except FileNotFoundError:
+        raise HTTPException(404, f"Project '{name}' not found")
+    return spec.model_dump()
+
+
+@app.post("/api/projects")
+async def create_project(spec: _projects.ProjectSpec) -> dict:
+    """Create a new project. Fails if the name collides with a built-in
+    task or an existing project."""
+    if _projects.is_builtin(spec.name):
+        raise HTTPException(
+            409,
+            f"Name '{spec.name}' is reserved by a built-in task.",
+        )
+    if _projects._project_path(spec.name).exists():
+        raise HTTPException(
+            409, f"Project '{spec.name}' already exists; use PUT to update."
+        )
+    _projects.save_spec(spec)
+    try:
+        _projects.register_spec(spec)
+    except Exception as exc:
+        raise HTTPException(400, f"Registration failed: {exc}") from exc
+    return {"project": spec.model_dump(), "created": True}
+
+
+@app.put("/api/projects/{name}")
+async def update_project(name: str, spec: _projects.ProjectSpec) -> dict:
+    """Update an existing project. The path-segment name must match the
+    spec's ``name`` field (projects cannot be renamed in-place — delete
+    and recreate to rename)."""
+    if name.lower() != spec.name:
+        raise HTTPException(
+            400,
+            f"URL name '{name}' does not match body name '{spec.name}'.",
+        )
+    if _projects.is_builtin(spec.name):
+        raise HTTPException(
+            409, f"Name '{spec.name}' is reserved by a built-in task.",
+        )
+    if not _projects._project_path(spec.name).exists():
+        raise HTTPException(404, f"Project '{spec.name}' not found.")
+    # Refuse to rewrite the spec of a task that is currently running.
+    runner = sessions.current
+    if (
+        runner is not None
+        and runner.status in ("running", "pending")
+        and runner.config.task.lower() == spec.name
+    ):
+        raise HTTPException(
+            409,
+            "Cannot edit a project while one of its runs is active.",
+        )
+    _projects.save_spec(spec)
+    try:
+        _projects.register_spec(spec)  # idempotent overwrite
+    except Exception as exc:
+        raise HTTPException(400, f"Registration failed: {exc}") from exc
+    return {"project": spec.model_dump(), "updated": True}
+
+
+@app.delete("/api/projects/{name}")
+async def delete_project(name: str) -> dict:
+    key = name.lower()
+    if _projects.is_builtin(key):
+        raise HTTPException(409, f"Cannot delete built-in task '{key}'.")
+    runner = sessions.current
+    if (
+        runner is not None
+        and runner.status in ("running", "pending")
+        and runner.config.task.lower() == key
+    ):
+        raise HTTPException(
+            409, "Cannot delete a project while one of its runs is active.",
+        )
+    _projects.delete_spec(key)
+    _projects.unregister_spec(key)
+    return {"ok": True, "deleted": key}
 
 
 # ---------------------------------------------------------------------------

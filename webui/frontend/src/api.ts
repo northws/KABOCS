@@ -9,6 +9,8 @@
 import type {
   ArchivedRun,
   FileEntry,
+  ProjectSpec,
+  ProjectsListResponse,
   RunConfig,
   StatusResponse,
   TaskSchema,
@@ -147,6 +149,43 @@ export async function writePriorFile(
 
 export async function deletePriorFile(name: string): Promise<void> {
   await jsonFetch(`/api/files/priors/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Projects (declarative dynamic tasks)
+// ---------------------------------------------------------------------------
+export async function listProjects(): Promise<ProjectsListResponse> {
+  return jsonFetch("/api/projects");
+}
+
+export async function getProject(name: string): Promise<ProjectSpec> {
+  return jsonFetch(`/api/projects/${encodeURIComponent(name)}`);
+}
+
+export async function createProject(spec: ProjectSpec): Promise<{
+  project: ProjectSpec;
+  created: boolean;
+}> {
+  return jsonFetch("/api/projects", {
+    method: "POST",
+    body: JSON.stringify(spec),
+  });
+}
+
+export async function updateProject(
+  name: string,
+  spec: ProjectSpec,
+): Promise<{ project: ProjectSpec; updated: boolean }> {
+  return jsonFetch(`/api/projects/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body: JSON.stringify(spec),
+  });
+}
+
+export async function deleteProject(name: string): Promise<void> {
+  await jsonFetch(`/api/projects/${encodeURIComponent(name)}`, {
     method: "DELETE",
   });
 }
