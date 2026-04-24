@@ -90,18 +90,53 @@ python webui/run_webui.py    # 打开 http://127.0.0.1:8000
 
 | 能力 | CLI 标志 | 说明 |
 |---|---|---|
+| **多目标 BO (qNEHVI)** | `--multi-objective --objectives CO H2 --ref-point 0 5` | `ModelListGP`（每个目标一条 GP）+ `qNoisyExpectedHypervolumeImprovement` 采集，内置 Task 预设（`TestTask`: y/y2；`CO2RRTask`: CO 最大化 vs HER 最小化）；运行结束写 `pareto_front.csv` + `pareto_front.png`，`ObjectiveSpec(direction="min")` 自动符号翻转 |
 | 声明式配置文件 | `--config run.yaml` | 支持 YAML / TOML / JSON；CLI 显式标志优先级高于配置文件，见 `configs/` 样例 |
 | 批量推荐 q>1 | `--q-batch 3` | 每轮给出多个连续候选，qNEI 走联合优化、UCB 走 sequential-greedy 退化，全部进入 Top-N 排序 |
 | 早停/收敛检测 | `--max-stagnation 3 --stagnation-tol 1e-3` | 最佳产率连续 N 轮无 >tol 改进自动终止，`run_metadata.json` 记录 `stopped_early` / `stop_reason` |
-| 自动化测试 | `pytest -q` | 40+ 测试覆盖归一化、特征选择、CandidateRecord、Task 注册、CLI、YAML 合并、TestTask 端到端 smoke；`.github/workflows/ci.yml` 已接入 |
+| 自动化测试 | `pytest -q` | 59+ 测试覆盖归一化、特征选择、CandidateRecord、Task 注册、CLI、YAML 合并、**MO 帕累托/参考点**、TestTask 端到端 smoke；`.github/workflows/ci.yml` 已接入 |
 | 打包与工程化 | `pyproject.toml` | 标准化元数据 + pytest / coverage / ruff 配置；`pip install -e .[dev]` 一键安装开发依赖 |
 | 模块重构 | — | CLI 交互助手（`prompt_user_*` / `print_*`）拆至 `kabo/interaction.py`，`kabo/acquisition.py` 回归到采集函数纯数学层，全部向后兼容 |
 | 懒加载 | — | `kabo/__init__.py` 采用 PEP 562 按需解析，`kabo.utils` 的 `torch` 变为函数体内导入；无 torch 环境也能跑轻量测试与配置校验 |
 
 ```bash
-# 示例：YAML 一键运行 + 批量 q=3 + 3 轮无改进自动停止
+# 示例 1：单目标 YAML + 批量 q=3 + 3 轮无改进自动停止
 python -m kabo --config configs/co2rr_base.yaml \
                --q-batch 3 --max-stagnation 3 --iterations 30
+
+# 示例 2：CO2RR 多目标（CO 最大化 vs HER 最小化，使用 Task 预设）
+python -m kabo --task co2rr --multi-objective \
+               --iterations 20 --seed 42
+
+# 示例 3：显式指定多目标列 + 参考点
+python -m kabo --task co2rr \
+               --objectives CO HCOOH --ref-point 0.0 0.0 \
+               --iterations 20
+```
+
+### 多目标 BO 机制
+
+- **独立代理**：每个目标拟合一条 `SingleTaskGP`（ARD Matérn 2.5，与单目标路径完全相同），再由 BoTorch 的 `ModelListGP` 统一出后验。
+- **采集函数**：`qNoisyExpectedHypervolumeImprovement`（qNEHVI）而非 `qEHVI`，因为实验催化数据永远带噪声，qNEHVI 在后验采样上估算 Pareto 前沿，避免了 qEHVI 假设「观测无噪」带来的偏差。
+- **方向处理**：`ObjectiveSpec(direction="min")` 在训练时对 `Y` 取负，对外展示仍为原始刻度；参考点同步翻转符号。
+- **参考点推断**：未指定 `--ref-point` 时按 `y_min − 0.1 × |range|` 对每个目标推断，并在每轮随新观测自动更新。
+- **输出**：`output/<run>/pareto_front.csv` 逐行按 Pareto rank 排序；2D/3D 目标自动生成 `pareto_front.png` 散点图（更高维跳过图输出）。
+- **`run_metadata.json` 追加**：`multi_objective` / `objectives[]` / `ref_point` / `qnehvi_mc_samples` / `pareto_front_csv`。
+
+自定义 Task 只需在子类里覆盖 `multi_objectives()`：
+
+```python
+from kabo.multi_objective import ObjectiveSpec
+from kabo.task.base import TaskBase, register_task
+
+@register_task
+class OERTask(TaskBase):
+    ...
+    def multi_objectives(self):
+        return [
+            ObjectiveSpec("O2_faradaic_efficiency", direction="max"),
+            ObjectiveSpec("overpotential_mV",       direction="min"),
+        ]
 ```
 
 ---

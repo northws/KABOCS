@@ -27,6 +27,10 @@ class TestBuildParser:
             "max_stagnation",
             "stagnation_tol",
             "acq_strategy",
+            "multi_objective",
+            "objectives",
+            "ref_point",
+            "qnehvi_mc_samples",
         }.issubset(dests)
 
     def test_defaults_are_stable(self):
@@ -35,6 +39,10 @@ class TestBuildParser:
         assert args.max_stagnation == 0
         assert args.stagnation_tol == pytest.approx(1e-4)
         assert args.acq_strategy == "ucb"
+        assert args.multi_objective is False
+        assert args.objectives is None
+        assert args.ref_point is None
+        assert args.qnehvi_mc_samples == 128
 
     def test_q_batch_parses_to_int(self):
         args = build_parser().parse_args(["--q-batch", "4"])
@@ -46,6 +54,25 @@ class TestBuildParser:
         )
         assert args.max_stagnation == 3
         assert args.stagnation_tol == pytest.approx(1e-3)
+
+    def test_multi_objective_flag(self):
+        args = build_parser().parse_args(
+            ["--multi-objective", "--qnehvi-mc-samples", "64"],
+        )
+        assert args.multi_objective is True
+        assert args.qnehvi_mc_samples == 64
+
+    def test_objectives_list(self):
+        args = build_parser().parse_args(["--objectives", "CO", "HCOOH"])
+        assert args.objectives == ["CO", "HCOOH"]
+
+    def test_ref_point_floats(self):
+        # Use '=' form so argparse doesn't try to interpret the first
+        # negative value as a new flag.
+        args = build_parser().parse_args(
+            ["--ref-point", "0.0", "5.0", "--objectives", "CO", "H2"],
+        )
+        assert args.ref_point == pytest.approx([0.0, 5.0])
 
 
 class TestParseArgsConfigMerge:

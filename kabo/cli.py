@@ -280,6 +280,48 @@ Examples:
             "(default 1e-4)."
         ),
     )
+    # ------------------------------------------------------------------ #
+    #  v1.2 additions: multi-objective BO (qNEHVI)
+    # ------------------------------------------------------------------ #
+    parser.add_argument(
+        "--multi-objective", action="store_true",
+        help=(
+            "Enable multi-objective Bayesian Optimization via qNEHVI. "
+            "Fits one GP per objective (ModelListGP) and optimises the "
+            "Pareto front.  Objectives default to the active task's "
+            "`multi_objectives()` preset unless overridden by "
+            "--objectives.  Writes pareto_front.{csv,png} to the run "
+            "output directory."
+        ),
+    )
+    parser.add_argument(
+        "--objectives", nargs="+", default=None, metavar="NAME",
+        help=(
+            "Explicit list of objective columns / short-names to feed "
+            "into qNEHVI, e.g. `--objectives CO HCOOH`.  Implicitly "
+            "enables --multi-objective when present.  Accepts task "
+            "target short names (CO, HCOOH) or raw column names "
+            "(Y_CO, Y_HCOOH).  All objectives are assumed maximise; "
+            "use --objectives with an in-code ObjectiveSpec for minimise."
+        ),
+    )
+    parser.add_argument(
+        "--ref-point", nargs="+", type=float, default=None, metavar="VAL",
+        help=(
+            "Hypervolume reference point (raw scale, one value per "
+            "objective in declared order).  When omitted, it is "
+            "inferred from the observed data with a 10%% margin.  For "
+            "'min' objectives, provide the raw upper bound — sign "
+            "flipping is handled internally."
+        ),
+    )
+    parser.add_argument(
+        "--qnehvi-mc-samples", type=int, default=128,
+        help=(
+            "Number of Monte Carlo samples for qNEHVI posterior "
+            "integration (default 128).  Higher = smoother / slower."
+        ),
+    )
     return parser
 
 
@@ -361,6 +403,10 @@ def main() -> None:
         q_batch=args.q_batch,
         max_stagnation=args.max_stagnation,
         stagnation_tol=args.stagnation_tol,
+        multi_objective=args.multi_objective,
+        objectives=args.objectives,
+        ref_point=args.ref_point,
+        qnehvi_mc_samples=args.qnehvi_mc_samples,
     )
 
     optimizer.run(

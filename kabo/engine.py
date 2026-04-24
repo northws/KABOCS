@@ -120,14 +120,26 @@ class KABOEngine:
         self.surrogate = SurrogateModel(device)
         self.preference_model = PreferenceModel(device)
         self.expert_prior: Optional[ExpertPrior] = None
+        # v1.2: multi-objective surrogate is lazily attached by
+        # ``fit_mo_surrogate`` only in MO runs; single-objective runs
+        # keep it at ``None`` and use ``self.surrogate`` throughout.
+        self.mo_surrogate = None  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
     #  Convenience proxies (read-only)
     # ------------------------------------------------------------------
     @property
     def bounds_raw(self) -> Optional[torch.Tensor]:
-        """Design-space bounds tensor ``(2, K)`` used for un-normalization."""
-        return self.surrogate.bounds_raw
+        """Design-space bounds tensor ``(2, K)`` used for un-normalization.
+
+        Falls through to the MO surrogate when the engine is running in
+        multi-objective mode (single-objective surrogate was never fit).
+        """
+        if self.surrogate.bounds_raw is not None:
+            return self.surrogate.bounds_raw
+        if self.mo_surrogate is not None:
+            return self.mo_surrogate.bounds_raw
+        return None
 
     @property
     def y_mean(self) -> float:
@@ -139,8 +151,18 @@ class KABOEngine:
 
     @property
     def surrogate_model(self):
-        """Underlying BoTorch ``SingleTaskGP`` (or ``None`` before fit)."""
-        return self.surrogate.model
+        """Underlying BoTorch surrogate (``SingleTaskGP`` in single-obj mode,
+        ``ModelListGP`` in multi-objective mode; ``None`` before fit)."""
+        if self.surrogate.model is not None:
+            return self.surrogate.model
+        if self.mo_surrogate is not None:
+            return self.mo_surrogate.model
+        return None
+
+    @property
+    def is_multi_objective(self) -> bool:
+        """``True`` iff a multi-objective surrogate has been fit."""
+        return self.mo_surrogate is not None and self.mo_surrogate.model is not None
 
     # ------------------------------------------------------------------
     #  Surrogate fitting
@@ -174,6 +196,103 @@ class KABOEngine:
             design_bounds=design_bounds,
             kernel_type=self.kernel_type,
             feature_types=feature_types,
+        )
+
+    # ------------------------------------------------------------------
+    #  Multi-objective surrogate fitting (v1.2)
+    # ------------------------------------------------------------------
+    def fit_mo_surrogate(
+        self,
+        X_raw: np.ndarray,
+        Y_raw: np.ndarray,
+        selected_features: list[str],
+        design_bounds: dict[str, tuple[float, float]],
+        objectives: list,
+        feature_types: Optional[dict[str, str]] = None,
+    ):
+        """Fit a ``ModelListGP`` — one sub-surrogate per objective.
+
+        Delegates to :class:`kabo.multi_objective.MultiObjectiveSurrogate`
+        and stores the result on ``self.mo_surrogate``.  Subsequent
+        acquisition calls should go through :meth:`build_mo_acquisition`
+        and :meth:`suggest_mo_continuous`.
+
+        Parameters
+        ----------
+        Y_raw : np.ndarray
+            Shape ``(N, M)`` matrix of per-objective observations on the
+            raw scale.
+        objectives : list[ObjectiveSpec]
+            One spec per column of ``Y_raw``, same order.  KABOEngine is
+            intentionally typing-naive about the exact class to keep
+            this module importable without ``kabo.multi_objective`` when
+            running in single-objective mode.
+        """
+        from kabo.multi_objective import MultiObjectiveSurrogate
+
+        self.mo_surrogate = MultiObjectiveSurrogate(
+            objectives=objectives, device=self.device,
+        )
+        return self.mo_surrogate.fit(
+            X_raw, Y_raw, selected_features,
+            design_bounds=design_bounds,
+            kernel_type=self.kernel_type,
+            feature_types=feature_types,
+        )
+
+    def build_mo_acquisition(
+        self,
+        ref_point_signed: list[float],
+        mc_samples: int = 128,
+    ):
+        """Build a qNEHVI acquisition over the fitted MO surrogate.
+
+        Parameters
+        ----------
+        ref_point_signed : list[float]
+            Hypervolume reference point already sign-flipped so every
+            objective is on the "maximise" convention.  Typically
+            produced by :func:`kabo.multi_objective.infer_ref_point`.
+        mc_samples : int, optional
+            Monte Carlo samples (default 128).  Matches the noise-robust
+            qNEHVI recommendation from BoTorch.
+        """
+        if self.mo_surrogate is None or self.mo_surrogate.model is None:
+            raise RuntimeError(
+                "fit_mo_surrogate() must run before build_mo_acquisition()."
+            )
+        from kabo.multi_objective import build_qnehvi
+
+        return build_qnehvi(
+            self.mo_surrogate,
+            ref_point=ref_point_signed,
+            X_baseline=self.mo_surrogate.submodels[0].train_X,
+            mc_samples=mc_samples,
+        )
+
+    def suggest_mo_continuous(
+        self,
+        acq_func,
+        dim: int,
+        q: int = 1,
+    ):
+        """Optimize the MO acquisition over ``[0, 1]^dim`` and return
+        ``q`` candidates.
+
+        Falls through to the same ``optimize_continuous_batch`` helper
+        used by single-objective mode, so integer-snap / batch / random
+        fallback behaviour is consistent.  When ``q == 1`` (the common
+        case), this matches :meth:`suggest_continuous` in surface.
+        """
+        from kabo.acquisition import optimize_continuous_batch
+
+        if self.mo_surrogate is None:
+            raise RuntimeError("MO surrogate not fit.")
+        return optimize_continuous_batch(
+            acq_func, dim, q, self.device,
+            self.n_restarts, self.raw_samples,
+            integer_indices=self.mo_surrogate.submodels[0].integer_indices,
+            bounds_raw=self.mo_surrogate.bounds_raw,
         )
 
     # ------------------------------------------------------------------

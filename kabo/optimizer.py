@@ -185,6 +185,10 @@ class KABOOptimizer:
         q_batch: int = 1,
         max_stagnation: int = 0,
         stagnation_tol: float = 1e-4,
+        multi_objective: bool = False,
+        objectives: Optional[list] = None,
+        ref_point: Optional[list[float]] = None,
+        qnehvi_mc_samples: int = 128,
     ) -> None:
         # Domain layer: default to CO2RR task for backward compatibility.
         self.task: TaskBase = task if task is not None else CO2RRTask()
@@ -240,6 +244,33 @@ class KABOOptimizer:
             raise ValueError(
                 f"stagnation_tol must be a finite non-negative number "
                 f"(got {self.stagnation_tol})."
+            )
+
+        # ---- v1.2: multi-objective resolution ------------------------------
+        # Precedence: explicit ``objectives`` argument > task preset >
+        # single-objective legacy mode.  ``multi_objective=True`` with no
+        # preset nor override is an error rather than silent fallback.
+        self.multi_objective: bool = bool(multi_objective) or bool(objectives)
+        self.qnehvi_mc_samples = int(qnehvi_mc_samples)
+        if self.qnehvi_mc_samples <= 0:
+            raise ValueError("qnehvi_mc_samples must be a positive integer.")
+
+        self.objectives = self._resolve_objectives(objectives) if self.multi_objective else []
+        self._ref_point_user_override: Optional[list[float]] = (
+            [float(r) for r in ref_point] if ref_point is not None else None
+        )
+        if self._ref_point_user_override is not None:
+            if len(self._ref_point_user_override) != len(self.objectives):
+                raise ValueError(
+                    f"--ref-point length {len(self._ref_point_user_override)} "
+                    f"does not match {len(self.objectives)} objectives."
+                )
+        if self.multi_objective:
+            logger.info(
+                "Multi-objective mode ENABLED (qNEHVI, mc_samples=%d). "
+                "Objectives: %s",
+                self.qnehvi_mc_samples,
+                [f"{o.column}/{o.direction}" for o in self.objectives],
             )
 
         if self.kabo_mode:
@@ -494,6 +525,12 @@ class KABOOptimizer:
 
         Uses explicit design-space bounds for normalization.
 
+        * **Single-objective mode** (default): fits one ``SingleTaskGP``
+          on the scalar training target from :meth:`TaskBase.build_training_target`.
+        * **Multi-objective mode** (``--multi-objective``): fits one
+          ``SingleTaskGP`` per declared objective and wraps them in a
+          ``ModelListGP`` via :class:`MultiObjectiveSurrogate`.
+
         Raises
         ------
         RuntimeError
@@ -507,8 +544,24 @@ class KABOOptimizer:
             raise RuntimeError("Phase 1 must be run before Phase 2.")
 
         X_raw = self.df[self.selected_features].values.astype(np.float64)
-        Y_raw = self._build_training_target(self.df)
 
+        if self.multi_objective:
+            Y_multi = self.task.build_training_target_multi(
+                self.df, self.objectives,
+            )
+            self.engine.fit_mo_surrogate(
+                X_raw, Y_multi, self.selected_features,
+                design_bounds=self.design_bounds,
+                objectives=self.objectives,
+                feature_types=self.task.feature_types(),
+            )
+            logger.info(
+                "Phase 2 complete (MO: %d objectives, %d features).",
+                len(self.objectives), len(self.selected_features),
+            )
+            return
+
+        Y_raw = self._build_training_target(self.df)
         self.engine.fit_surrogate(
             X_raw, Y_raw, self.selected_features,
             design_bounds=self.design_bounds,
@@ -706,22 +759,43 @@ class KABOOptimizer:
                 # Re-fit preference model after PE queries
                 self.engine.refit_preference()
 
-            # 1. Build acquisition function (UCB/qNEI + optional KABO wrap)
-            if self.acq_strategy == "ucb":
+            # 1. Build acquisition function
+            if self.multi_objective:
+                # qNEHVI — single-shot; no β schedule (does not apply to HV).
+                ref_point_signed = self._current_ref_point_signed()
+                acq_func = self.engine.build_mo_acquisition(
+                    ref_point_signed, mc_samples=self.qnehvi_mc_samples,
+                )
+                beta_t = float("nan")
+                logger.info(
+                    "Multi-objective acquisition: qNEHVI (objectives=%d, "
+                    "mc_samples=%d, ref=%s)",
+                    len(self.objectives), self.qnehvi_mc_samples,
+                    [round(float(r), 4) for r in ref_point_signed],
+                )
+            elif self.acq_strategy == "ucb":
                 beta_t = self._compute_beta_t(iteration, K)
                 self._beta_trace.append(beta_t)
                 logger.info("Using UCB with β_t = %.6f", beta_t)
+                acq_func = self.engine.build_acquisition(beta=beta_t)
             else:
                 beta_t = float(self.beta)
                 logger.info(
                     "Using qNEI (Monte Carlo, mc_samples=%d)",
                     self.qnei_mc_samples,
                 )
-
-            acq_func = self.engine.build_acquisition(beta=beta_t)
+                acq_func = self.engine.build_acquisition(beta=beta_t)
 
             # 2. Optimize over continuous [0,1]^K — single or batch
-            if self.q_batch > 1:
+            if self.multi_objective:
+                batch = self.engine.suggest_mo_continuous(
+                    acq_func, K, q=max(self.q_batch, 1),
+                )
+                logger.info(
+                    "MO continuous proposals: requested q=%d, received %d.",
+                    self.q_batch, len(batch),
+                )
+            elif self.q_batch > 1:
                 batch = self.engine.suggest_continuous_batch(
                     acq_func, K, q=self.q_batch,
                 )
@@ -1052,11 +1126,159 @@ class KABOOptimizer:
             all_product_columns=self.task.all_product_columns(),
             product_names=self.task.product_names(),
         )
+
+        # v1.2: Pareto artifacts for multi-objective runs.
+        if self.multi_objective:
+            try:
+                self._write_pareto_artifacts()
+            except Exception as exc:
+                # Artifact generation is best-effort — an exception here
+                # must not discard the dataset returned below.
+                logger.warning(
+                    "Failed to write Pareto artifacts: %s", exc,
+                )
+
         return self.df
 
     # ===================================================================
     #  Helpers
     # ===================================================================
+    def _resolve_objectives(self, user_override):
+        """Materialise the final :class:`ObjectiveSpec` list.
+
+        Precedence:
+
+        1. ``user_override`` from the CLI / programmatic caller.  May be
+           either a list of raw ``ObjectiveSpec`` instances *or* a list
+           of short-name strings (e.g. ``["CO", "HCOOH"]``) that will be
+           resolved against :meth:`TaskBase.target_columns`.
+        2. :meth:`TaskBase.multi_objectives` preset.
+
+        Raises
+        ------
+        ValueError
+            If neither source yields at least 2 objectives.
+        """
+        from kabo.multi_objective import ObjectiveSpec
+
+        if user_override:
+            specs: list[ObjectiveSpec] = []
+            task_cols = self.task.target_columns()
+            task_col_values = set(task_cols.values())
+            for item in user_override:
+                if isinstance(item, ObjectiveSpec):
+                    specs.append(item)
+                elif isinstance(item, str):
+                    # Accept either "Y_CO" (column) or "CO" (short name).
+                    if item in task_col_values:
+                        col = item
+                    elif item.upper() in task_cols:
+                        col = task_cols[item.upper()]
+                    else:
+                        raise ValueError(
+                            f"Unknown objective '{item}' for task "
+                            f"'{self.task.task_name()}'. Known: "
+                            f"{sorted(task_col_values)} "
+                            f"(short names: {sorted(task_cols)})."
+                        )
+                    specs.append(ObjectiveSpec(column=col, direction="max"))
+                elif isinstance(item, dict):
+                    specs.append(ObjectiveSpec(**item))
+                else:
+                    raise TypeError(
+                        f"Unsupported objective spec element: {item!r} "
+                        f"(type {type(item).__name__})."
+                    )
+            source = "user override"
+        else:
+            specs = list(self.task.multi_objectives())
+            source = f"task preset ({self.task.task_name()})"
+
+        if len(specs) < 2:
+            raise ValueError(
+                f"Multi-objective mode requires >= 2 objectives, got "
+                f"{len(specs)} from {source}. "
+                f"Either declare them in {type(self.task).__name__}."
+                "multi_objectives() or pass --objectives on the CLI."
+            )
+        logger.info(
+            "Resolved %d objective(s) from %s: %s",
+            len(specs), source,
+            [f"{o.column}({o.direction})" for o in specs],
+        )
+        return specs
+
+    def _current_ref_point_signed(self) -> list[float]:
+        """Return the qNEHVI reference point on the signed scale.
+
+        If the user supplied ``--ref-point``, we trust it and flip signs
+        so every objective is on the maximise convention.  Otherwise we
+        re-infer from the current ``self.df`` at every iteration — this
+        keeps the reference meaningfully "dominated" as new observations
+        arrive and the raw-scale range shifts.
+        """
+        from kabo.multi_objective import infer_ref_point
+
+        if self._ref_point_user_override is not None:
+            # User gave raw-scale values — flip sign for "min" objectives.
+            return [
+                o.sign * float(r)
+                for o, r in zip(self.objectives, self._ref_point_user_override)
+            ]
+
+        Y = self.df[[o.column for o in self.objectives]].values
+        return infer_ref_point(Y, self.objectives, margin=0.1)
+
+    def _write_pareto_artifacts(self) -> None:
+        """Persist Pareto-front CSV + PNG to the run output directory.
+
+        Called once at the end of ``phase3_optimize`` when running in
+        multi-objective mode.  Silently returns if fewer than 2
+        observations with complete objective columns are available.
+        """
+        from kabo.multi_objective import compute_pareto_front, plot_pareto_front
+
+        cols = [o.column for o in self.objectives]
+        missing = [c for c in cols if c not in self.df.columns]
+        if missing:
+            logger.warning(
+                "Cannot write Pareto artifacts: columns missing from "
+                "dataframe: %s", missing,
+            )
+            return
+
+        sub = self.df.dropna(subset=cols)
+        if len(sub) < 2:
+            logger.info(
+                "Pareto artifacts: skipping (only %d complete observations).",
+                len(sub),
+            )
+            return
+
+        Y = sub[cols].values
+        mask = compute_pareto_front(Y, self.objectives)
+        pareto_df = sub.loc[mask].copy()
+        pareto_df.insert(0, "pareto_rank", range(1, len(pareto_df) + 1))
+
+        csv_path = self.output_dir / "pareto_front.csv"
+        pareto_df.to_csv(csv_path, index=False)
+        logger.info(
+            "Pareto front saved to %s (%d / %d points non-dominated).",
+            csv_path, int(mask.sum()), len(sub),
+        )
+
+        title = (
+            "Pareto front · "
+            + " vs ".join(
+                f"{o.label} ({o.direction})" for o in self.objectives
+            )
+        )
+        plot_pareto_front(
+            sub, self.objectives,
+            save_path=self.output_dir / "pareto_front.png",
+            title=title,
+        )
+
     def _append_observation(
         self,
         candidate_record: CandidateRecord,
@@ -1186,6 +1408,30 @@ class KABOOptimizer:
                 None
                 if getattr(self, "_best_so_far", float("-inf")) == float("-inf")
                 else float(self._best_so_far)
+            ),
+            # Multi-objective audit trail (v1.2)
+            "multi_objective": self.multi_objective,
+            "objectives": (
+                [
+                    {
+                        "column": o.column,
+                        "direction": o.direction,
+                        "ref_point": o.ref_point,
+                        "display_name": o.label,
+                    }
+                    for o in self.objectives
+                ]
+                if self.multi_objective else []
+            ),
+            "ref_point": self._ref_point_user_override,
+            "qnehvi_mc_samples": (
+                self.qnehvi_mc_samples if self.multi_objective else None
+            ),
+            "pareto_front_csv": (
+                str(self.output_dir / "pareto_front.csv")
+                if self.multi_objective
+                and (self.output_dir / "pareto_front.csv").exists()
+                else None
             ),
             "n_rows_final": int(len(result_df)),
             "output_data": str(output_path),

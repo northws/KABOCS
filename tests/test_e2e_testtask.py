@@ -153,3 +153,66 @@ class TestDemoRunTestTask:
         assert meta["max_stagnation"] == 1
         assert meta["stopped_early"] is True
         assert "stagnation" in meta["stop_reason"]
+
+    def test_multi_objective_run_emits_pareto_artifacts(
+        self,
+        tmp_path: Path,
+        test_data_csv: Path,
+    ):
+        """--multi-objective on TestTask fits ModelListGP + writes pareto_front.{csv,png}."""
+        KABOOptimizer, TestTask = _import_optimizer()
+
+        opt = KABOOptimizer(
+            data_path=test_data_csv,
+            task=TestTask(),
+            top_k=3,
+            seed=13,
+            output_dir=tmp_path / "mo_run",
+            skip_feature_selection=True,
+            candidates_path=None,
+            device="cpu",
+            multi_objective=True,   # uses TestTask.multi_objectives() preset
+        )
+        opt.run(n_iterations=2, interactive=False)
+
+        run_dir = tmp_path / "mo_run"
+        meta = json.loads((run_dir / "run_metadata.json").read_text())
+
+        assert meta["multi_objective"] is True
+        assert len(meta["objectives"]) == 2
+        assert {o["column"] for o in meta["objectives"]} == {"y", "y2"}
+        assert meta["qnehvi_mc_samples"] == 128
+
+        # Pareto artifacts written.
+        assert (run_dir / "pareto_front.csv").exists()
+        # PNG is a best-effort artifact — may be absent if matplotlib has
+        # trouble in headless mode — but the CSV must exist.
+        import pandas as pd
+        pareto = pd.read_csv(run_dir / "pareto_front.csv")
+        assert "pareto_rank" in pareto.columns
+        assert "y" in pareto.columns and "y2" in pareto.columns
+        assert len(pareto) >= 1
+
+    def test_multi_objective_explicit_objectives_override(
+        self,
+        tmp_path: Path,
+        test_data_csv: Path,
+    ):
+        """--objectives override short-name resolution works (mirrors CLI)."""
+        KABOOptimizer, TestTask = _import_optimizer()
+
+        opt = KABOOptimizer(
+            data_path=test_data_csv,
+            task=TestTask(),
+            top_k=3,
+            seed=17,
+            output_dir=tmp_path / "mo_override_run",
+            skip_feature_selection=True,
+            candidates_path=None,
+            device="cpu",
+            objectives=["Y", "Y2"],  # short names resolved via target_columns()
+        )
+        # Should implicitly enable multi-objective mode.
+        assert opt.multi_objective is True
+        assert {o.column for o in opt.objectives} == {"y", "y2"}
+        opt.run(n_iterations=1, interactive=False)

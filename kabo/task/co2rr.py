@@ -21,6 +21,7 @@ from kabo.constants import (
     PRODUCT_COLUMNS,
     PRODUCT_NAMES,
 )
+from kabo.multi_objective import ObjectiveSpec
 from kabo.utils import get_logger
 
 from kabo.task.base import TaskBase, register_task
@@ -184,6 +185,29 @@ class CO2RRTask(TaskBase):
             h2_penalty_weight,
         )
         return y_composite
+
+    def multi_objectives(self) -> list[ObjectiveSpec]:
+        """Default MO preset: maximise CO selectivity vs. minimise HER.
+
+        Rationale: CO2RR catalysis trades off the target carbon-product
+        yield against competing hydrogen evolution (HER).  Instead of
+        the scalar ``Y_CO − w·Y_H2`` composite used in single-objective
+        mode, the MO preset treats both as first-class objectives so the
+        optimiser can expose the full Pareto front.
+
+        Users can always override this at run-time via
+        ``--objectives CO HCOOH`` or similar.
+        """
+        return [
+            ObjectiveSpec(
+                column="Y_CO", direction="max",
+                display_name="CO yield",
+            ),
+            ObjectiveSpec(
+                column="Y_H2", direction="min",
+                display_name="H2 (HER, to minimise)",
+            ),
+        ]
 
     # -------------------------------------------------------------------------
     #  Interactive / simulated observation collection

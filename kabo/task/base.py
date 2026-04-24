@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from kabo.constants import TARGET_COLUMN
+from kabo.multi_objective import ObjectiveSpec
 from kabo.utils import get_logger
 
 logger = get_logger(__name__)
@@ -139,6 +140,67 @@ class TaskBase(ABC):
         Implementations may define composite objectives (e.g. CO2RR's
         ``Y_target - weight * Y_H2`` selectivity form).
         """
+
+    # -------------------------------------------------------------------------
+    #  Multi-objective declaration (v1.2)
+    # -------------------------------------------------------------------------
+    def multi_objectives(self) -> list[ObjectiveSpec]:
+        """Declare a default multi-objective configuration for this task.
+
+        The return value is consumed when the user passes ``--multi-objective``
+        on the CLI without an explicit ``--objectives`` list.  An empty
+        list (the default) means "this Task does not ship with a
+        built-in MO preset"; single-objective mode remains the default.
+
+        Concrete tasks should return a list of :class:`ObjectiveSpec`
+        where every ``column`` already exists in :meth:`target_columns`
+        values.  The list order determines the dimensions of the
+        hypervolume reference point.
+
+        Returns
+        -------
+        list[ObjectiveSpec]
+            Empty in the base implementation; override in subclasses
+            that want to expose a default MO preset.
+        """
+        return []
+
+    def build_training_target_multi(
+        self,
+        df: pd.DataFrame,
+        objectives: list[ObjectiveSpec],
+        **kwargs,
+    ) -> np.ndarray:
+        """Assemble the ``(N, M)`` raw-scale target matrix for MO fitting.
+
+        Default implementation simply pulls the declared objective
+        columns from ``df`` and stacks them column-wise.  Subclasses may
+        override to apply composite transforms (e.g. a penalty term or
+        Pareto-aware scaling) when appropriate — but keep in mind that
+        the MO surrogate already understands ``direction`` per objective,
+        so most tasks will not need to.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Full dataset; must contain every ``objective.column``.
+        objectives : list[ObjectiveSpec]
+            As returned by :meth:`multi_objectives` (or an explicit CLI
+            override constructed by the orchestrator).
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(N, M)`` in the same column order as ``objectives``.
+        """
+        missing = [o.column for o in objectives if o.column not in df.columns]
+        if missing:
+            raise KeyError(
+                f"{self.task_name()}: objective columns missing from "
+                f"DataFrame: {missing}"
+            )
+        cols = [o.column for o in objectives]
+        return df[cols].values.astype(np.float64)
 
     # -------------------------------------------------------------------------
     #  Optional hooks (default implementations provided)
