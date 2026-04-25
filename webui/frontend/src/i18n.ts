@@ -9,7 +9,7 @@ export const zh: Record<string, string> = {
   "tab.data": "数据",
   "tab.priors": "先验",
   "tab.history": "历史",
-  "app.footer": "KABOCS 网页界面 · 面向催化系统的知识增强贝叶斯优化",
+  "app.footer": "KABOCS· 面向催化系统的知识增强贝叶斯优化 copyright © 2026 northws (MIT License)",
 
   // ---------- TopBar ----------
   "topbar.title": "KABOCS",
@@ -124,6 +124,13 @@ export const zh: Record<string, string> = {
   "rec.expert": "专家",
   "rec.fixed": "固定",
   "rec.pending": "待定",
+
+  // ---------- VisualizationPanel ----------
+  "viz.title": "实时可视化（迭代 {iteration}）",
+  "viz.gp": "GP 后验 / 采集函数",
+  "viz.gp.dims": "敏感维度：{a} × {b}（其余维固定在 0.5）",
+  "viz.pca": "设计空间探索（PCA）",
+  "viz.pca.legend": "训练点 {train} · 候选 {cand}",
 
   // ---------- LogStream ----------
   "log.lines": "日志流（{count} 行）",
@@ -258,7 +265,7 @@ export const en: Record<string, string> = {
   "tab.priors": "Priors",
   "tab.history": "History",
   "app.footer":
-    "KABOCS WebUI · Knowledge-Augmented Bayesian Optimization for Catalytic Systems",
+    "KABOCS WebUI · Knowledge-Augmented Bayesian Optimization for Catalytic Systems copyright © 2026 northws (MIT License)",
 
   // ---------- TopBar ----------
   "topbar.title": "KABOCS",
@@ -374,6 +381,13 @@ export const en: Record<string, string> = {
   "rec.expert": "expert",
   "rec.fixed": "fixed",
   "rec.pending": "pending",
+
+  // ---------- VisualizationPanel ----------
+  "viz.title": "Live visualization (iteration {iteration})",
+  "viz.gp": "GP posterior / acquisition",
+  "viz.gp.dims": "sensitive dims: {a} × {b} (other dims pinned to 0.5)",
+  "viz.pca": "Design-space exploration (PCA)",
+  "viz.pca.legend": "{train} observations · {cand} candidates",
 
   // ---------- LogStream ----------
   "log.lines": "Log stream ({count} lines)",

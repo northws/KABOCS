@@ -158,7 +158,11 @@ class SessionRunner:
             )
 
             # Install bridge (monkey-patches interactive hooks).
-            self.bridge.install(task=task, worker_thread=threading.current_thread())
+            self.bridge.install(
+                task=task,
+                worker_thread=threading.current_thread(),
+                optimizer=optimizer,
+            )
 
             self.bridge.emit(
                 "run_started",

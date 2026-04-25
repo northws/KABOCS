@@ -5,6 +5,7 @@ import ConfigPanel from "./ConfigPanel";
 import LogStream from "./LogStream";
 import PromptPanel from "./PromptPanel";
 import RecommendationList from "./RecommendationList";
+import VisualizationPanel from "./VisualizationPanel";
 import { useEventStream } from "../hooks/useEventStream";
 import { abortRun, currentRunStatus, listTasks, startRun } from "../api";
 import { t } from "../i18n";
@@ -17,6 +18,7 @@ import type {
   RunConfig,
   StatusResponse,
   TaskSchema,
+  VisualizationEvent,
 } from "../types";
 
 const INITIAL_CONFIG: RunConfig = {
@@ -98,7 +100,7 @@ export default function RunPage({ onStatusChange }: Props) {
   }, [onStatusChange]);
 
   const runActive = status.status === "running" || status.status === "pending";
-  const { logs, recommendations, best, lastLifecycle } = useDerived(events);
+  const { logs, recommendations, best, viz, lastLifecycle } = useDerived(events);
 
   async function handleStart() {
     setStarting(true);
@@ -175,6 +177,7 @@ export default function RunPage({ onStatusChange }: Props) {
         />
 
         {best ? <BestCard best={best} /> : null}
+        <VisualizationPanel event={viz} />
         <RecommendationList event={recommendations} />
         <LogStream logs={logs} />
 
@@ -288,12 +291,14 @@ function useDerived(events: KaboEvent[]) {
     const logs: LogEvent[] = [];
     let recommendations: RecommendationsEvent | null = null;
     let best: BestFoundEvent | null = null;
+    let viz: VisualizationEvent | null = null;
     let lastLifecycle: KaboEvent | null = null;
 
     for (const ev of events) {
       if (ev.type === "log") logs.push(ev);
       else if (ev.type === "recommendations") recommendations = ev;
       else if (ev.type === "best_found") best = ev;
+      else if (ev.type === "visualization") viz = ev;
       else if (
         ev.type === "run_started"
         || ev.type === "run_completed"
@@ -303,6 +308,6 @@ function useDerived(events: KaboEvent[]) {
       }
     }
 
-    return { logs, recommendations, best, lastLifecycle };
+    return { logs, recommendations, best, viz, lastLifecycle };
   }, [events]);
 }

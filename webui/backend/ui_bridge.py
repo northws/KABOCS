@@ -87,6 +87,10 @@ class WebUIBridge:
 
     _originals: dict = field(default_factory=dict, init=False)
     _task_ref: Any = field(default=None, init=False)
+    _optimizer_ref: Any = field(default=None, init=False)
+    _last_acq_func: Any = field(default=None, init=False)
+    _orig_build_acquisition: Optional[Callable] = field(default=None, init=False)
+    _orig_build_mo_acquisition: Optional[Callable] = field(default=None, init=False)
     _orig_task_prompt: Optional[Callable] = field(default=None, init=False)
     _orig_task_simulate: Optional[Callable] = field(default=None, init=False)
     _orig_input: Callable = field(default=None, init=False)
@@ -397,7 +401,47 @@ class WebUIBridge:
             selected_features=list(selected_features),
             all_features=list(all_feature_columns),
         )
+        # Best-effort visualization: GP mean/variance/acq heatmaps +
+        # PCA projection of the current design-space exploration.
+        # Failures are swallowed so a rendering bug never aborts a run.
+        try:
+            self._maybe_emit_visualization(
+                iteration=iteration,
+                candidates_norm=list(candidates_norm),
+                top_indices=list(top_indices),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import logging as _logging
+            _logging.getLogger(__name__).debug(
+                "visualization emit skipped: %s", exc,
+            )
         return top_indices
+
+    # ------------------------------------------------------------------
+    # Visualization hook (real-time GP + acquisition heatmaps)
+    # ------------------------------------------------------------------
+    def _maybe_emit_visualization(
+        self,
+        iteration: int,
+        candidates_norm: list,
+        top_indices: list[int],
+    ) -> None:
+        if self._optimizer_ref is None:
+            return
+        # Import lazily so the core bridge stays importable even when
+        # matplotlib/sklearn aren't installed.
+        from webui.backend.viz import build_iteration_visualization
+
+        payload = build_iteration_visualization(
+            optimizer=self._optimizer_ref,
+            acq_func=self._last_acq_func,
+            iteration=iteration,
+            candidates_norm=candidates_norm,
+            top_indices=top_indices,
+        )
+        if payload is None:
+            return
+        self.emit("visualization", **payload)
 
     def show_best(
         self,
@@ -445,12 +489,43 @@ class WebUIBridge:
     # ------------------------------------------------------------------
     # Install / uninstall lifecycle
     # ------------------------------------------------------------------
-    def install(self, task: Any, worker_thread: threading.Thread) -> None:
+    def install(
+        self,
+        task: Any,
+        worker_thread: threading.Thread,
+        optimizer: Any = None,
+    ) -> None:
         if self._installed:
             raise RuntimeError("WebUIBridge already installed.")
         self._installed = True
         self._task_ref = task
         self._worker_thread = worker_thread
+        self._optimizer_ref = optimizer
+
+        # Wrap KABOEngine.build_acquisition on the instance so we can
+        # cache the latest acq_func for visualization without touching
+        # the kabo package.
+        engine = getattr(optimizer, "engine", None) if optimizer is not None else None
+        if engine is not None:
+            self._orig_build_acquisition = engine.build_acquisition
+            self._orig_build_mo_acquisition = getattr(
+                engine, "build_mo_acquisition", None,
+            )
+
+            def _wrapped_build(*args: Any, **kwargs: Any):
+                acq = self._orig_build_acquisition(*args, **kwargs)  # type: ignore[misc]
+                self._last_acq_func = acq
+                return acq
+
+            engine.build_acquisition = _wrapped_build  # type: ignore[method-assign]
+
+            if self._orig_build_mo_acquisition is not None:
+                def _wrapped_build_mo(*args: Any, **kwargs: Any):
+                    acq = self._orig_build_mo_acquisition(*args, **kwargs)  # type: ignore[misc]
+                    self._last_acq_func = acq
+                    return acq
+
+                engine.build_mo_acquisition = _wrapped_build_mo  # type: ignore[method-assign]
 
         self._originals = {
             "prompt_user_candidate_choice": _opt_mod.prompt_user_candidate_choice,
@@ -502,6 +577,23 @@ class WebUIBridge:
             except Exception:
                 pass
 
+        # Restore engine.build_acquisition wrapper.
+        engine = (
+            getattr(self._optimizer_ref, "engine", None)
+            if self._optimizer_ref is not None else None
+        )
+        if engine is not None:
+            if self._orig_build_acquisition is not None:
+                try:
+                    engine.build_acquisition = self._orig_build_acquisition  # type: ignore[method-assign]
+                except Exception:
+                    pass
+            if self._orig_build_mo_acquisition is not None:
+                try:
+                    engine.build_mo_acquisition = self._orig_build_mo_acquisition  # type: ignore[method-assign]
+                except Exception:
+                    pass
+
         if self._orig_input is not None:
             builtins.input = self._orig_input  # type: ignore[assignment]
 
@@ -514,6 +606,10 @@ class WebUIBridge:
 
         self._task_ref = None
         self._worker_thread = None
+        self._optimizer_ref = None
+        self._last_acq_func = None
+        self._orig_build_acquisition = None
+        self._orig_build_mo_acquisition = None
 
 
 # ---------------------------------------------------------------------------

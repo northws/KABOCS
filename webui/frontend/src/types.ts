@@ -109,6 +109,7 @@ export type KaboEvent =
   | PromptEvent
   | RecommendationsEvent
   | BestFoundEvent
+  | VisualizationEvent
   | RunLifecycleEvent;
 
 export interface LogEvent {
@@ -146,6 +147,25 @@ export interface BestFoundEvent {
   best_value: number | null;
   products: Record<string, number | null>;
   features: Record<string, number | null>;
+}
+
+export interface VizPanelImage {
+  image: string; // data:image/png;base64,...
+  iteration: number;
+  dims?: [string, string];
+  n_train?: number;
+  n_candidates?: number;
+}
+
+export interface VisualizationEvent {
+  type: "visualization";
+  ts: number;
+  iteration: number;
+  target_column: string;
+  target_name: string;
+  selected_features: string[];
+  gp_landscape: VizPanelImage | null;
+  pca_projection: VizPanelImage | null;
 }
 
 export interface RunLifecycleEvent {
