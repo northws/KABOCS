@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, MessageSquare, Send } from "lucide-react";
 import { submitAnswer } from "../api";
+import { t } from "../i18n";
 import type {
   PromptEvent,
   RecommendationsEvent,
@@ -11,17 +12,13 @@ interface Props {
   latestRecommendations: RecommendationsEvent | null;
 }
 
-/**
- * Container for whichever prompt is currently awaiting an answer from
- * the backend optimizer. Delegates to a kind-specific sub-component.
- */
 export default function PromptPanel({ prompt, latestRecommendations }: Props) {
   if (!prompt) {
     return (
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
         <div className="flex items-center gap-2">
           <MessageSquare className="w-4 h-4" />
-          Waiting for the optimizer to emit the next prompt…
+          {t("prompt.waiting")}
         </div>
       </div>
     );
@@ -31,7 +28,7 @@ export default function PromptPanel({ prompt, latestRecommendations }: Props) {
     <div className="rounded-lg border-2 border-brand-400 bg-brand-50/50 p-5 shadow-sm">
       <div className="flex items-center gap-2 text-brand-800 mb-4">
         <MessageSquare className="w-5 h-5" />
-        <div className="font-semibold">Awaiting your input</div>
+        <div className="font-semibold">{t("prompt.awaiting")}</div>
         <span className="text-xs text-slate-500 ml-2">
           prompt #{prompt.prompt_id} · {prompt.kind}
         </span>
@@ -89,12 +86,7 @@ function CandidateChoiceForm({
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-slate-600">
-        Choose which candidate to execute. The{" "}
-        <span className="font-semibold">bold rank</span> is the model's top
-        recommendation; picking another rank will also be recorded as a
-        preference signal when KABO mode is active.
-      </p>
+      <p className="text-sm text-slate-600">{t("prompt.candidate.desc")}</p>
 
       <div className="flex flex-wrap gap-2">
         {ranks.map((r) => {
@@ -115,7 +107,7 @@ function CandidateChoiceForm({
               } ${isFirst ? "font-semibold" : ""}`}
               title={rec ? `source: ${rec.source} · acq ${rec.acq_value.toFixed(4)}` : ""}
             >
-              Rank #{r}
+              {t("prompt.candidate.rank")}{r}
               {rec ? (
                 <span className="text-[10px] ml-1 opacity-70">
                   ({rec.acq_value.toFixed(3)})
@@ -132,21 +124,21 @@ function CandidateChoiceForm({
           onClick={() => go("tie")}
           className="px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:border-amber-400 text-slate-700"
         >
-          Declare tie
+          {t("prompt.candidate.tie")}
         </button>
         <button
           disabled={submitting}
           onClick={() => go("manual")}
           className="px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:border-amber-400 text-slate-700"
         >
-          Manual override
+          {t("prompt.candidate.manual")}
         </button>
         <button
           disabled={submitting}
           onClick={() => go("exit")}
           className="px-3 py-1.5 rounded-md border border-rose-300 bg-white hover:bg-rose-50 text-rose-700"
         >
-          Stop optimization
+          {t("prompt.candidate.stop")}
         </button>
       </div>
 
@@ -155,8 +147,6 @@ function CandidateChoiceForm({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Manual candidate / non-selected features (shared form scaffolding)
 // ---------------------------------------------------------------------------
 function featureTable(
   features: string[],
@@ -170,9 +160,9 @@ function featureTable(
       <table className="w-full text-sm">
         <thead className="bg-slate-50 sticky top-0">
           <tr className="text-left text-xs uppercase text-slate-500">
-            <th className="px-3 py-2 font-medium">Feature</th>
-            <th className="px-3 py-2 font-medium">Bounds</th>
-            <th className="px-3 py-2 font-medium">Value</th>
+            <th className="px-3 py-2 font-medium">{t("prompt.column.feature")}</th>
+            <th className="px-3 py-2 font-medium">{t("prompt.column.bounds")}</th>
+            <th className="px-3 py-2 font-medium">{t("prompt.column.value")}</th>
           </tr>
         </thead>
         <tbody>
@@ -259,10 +249,7 @@ function ManualCandidateForm({
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-slate-600">
-        Supply full feature values for a custom candidate. Empty cells will
-        default to the design-space midpoint.
-      </p>
+      <p className="text-sm text-slate-600">{t("prompt.manual.desc")}</p>
 
       {featureTable(prompt.features, prompt.bounds, values, setValues, submitting)}
 
@@ -270,16 +257,15 @@ function ManualCandidateForm({
         <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded">
           <AlertTriangle className="w-3.5 h-3.5 mt-0.5" />
           <div>
-            Out-of-bounds values for{" "}
-            <code className="font-mono">{hasOOB.join(", ")}</code>. Confirm
-            intentional override{" "}
+            {t("prompt.manual.oob")}{" "}
+            <code className="font-mono">{hasOOB.join(", ")}</code>.{" "}
             <label className="ml-2 inline-flex items-center gap-1">
               <input
                 type="checkbox"
                 checked={oob > 0}
                 onChange={(e) => setOob(e.target.checked ? hasOOB.length : 0)}
               />
-              I accept
+              {t("prompt.manual.accept")}
             </label>
           </div>
         </div>
@@ -322,10 +308,7 @@ function NonselectedFeaturesForm({
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-slate-600">
-        These features are outside the GP model; fill in the actual
-        experimental conditions you plan to use.
-      </p>
+      <p className="text-sm text-slate-600">{t("prompt.nonselected.desc")}</p>
 
       {featureTable(prompt.features, prompt.bounds, values, setValues, submitting)}
 
@@ -336,7 +319,7 @@ function NonselectedFeaturesForm({
           className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700 text-sm disabled:opacity-60"
         >
           <Send className="w-4 h-4" />
-          Submit
+          {t("prompt.submit")}
         </button>
       </div>
       {error ? <ErrorBanner text={error} /> : null}
@@ -384,18 +367,15 @@ function ProductYieldsForm({
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-slate-600">
-        Record the experimental yield for every product. Target is highlighted.
-        Enter <code>0</code> for undetected products.
-      </p>
+      <p className="text-sm text-slate-600">{t("prompt.yields.desc")}</p>
 
       <div className="max-h-[400px] overflow-auto log-scroll rounded-md border border-slate-200 bg-white">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 sticky top-0">
             <tr className="text-left text-xs uppercase text-slate-500">
-              <th className="px-3 py-2 font-medium">Product</th>
-              <th className="px-3 py-2 font-medium">Column</th>
-              <th className="px-3 py-2 font-medium">Yield</th>
+              <th className="px-3 py-2 font-medium">{t("prompt.column.product")}</th>
+              <th className="px-3 py-2 font-medium">{t("prompt.column.col")}</th>
+              <th className="px-3 py-2 font-medium">{t("prompt.column.yield")}</th>
             </tr>
           </thead>
           <tbody>
@@ -410,7 +390,7 @@ function ProductYieldsForm({
                   <span className="font-medium">{p.display}</span>
                   {p.is_target ? (
                     <span className="ml-2 text-[10px] text-amber-700 font-semibold">
-                      ★ TARGET
+                      {t("prompt.yields.target")}
                     </span>
                   ) : null}
                 </td>
@@ -421,7 +401,7 @@ function ProductYieldsForm({
                   <input
                     disabled={submitting}
                     className="w-full px-2 py-1 rounded border border-slate-300 bg-white text-sm num focus:outline-none focus:ring-2 focus:ring-brand-200"
-                    placeholder="e.g. 42.5"
+                    placeholder={t("prompt.yields.placeholder")}
                     value={values[p.column] ?? ""}
                     onChange={(e) =>
                       setValues({ ...values, [p.column]: e.target.value })
@@ -481,14 +461,14 @@ function RawInputForm({
           disabled={submitting}
           onChange={(e) => setValue(e.target.value)}
           className="flex-1 px-3 py-2 rounded border border-slate-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-brand-200"
-          placeholder="Your response (e.g. a / b / tie)"
+          placeholder={t("prompt.raw.placeholder")}
         />
         <button
           disabled={submitting}
           onClick={go}
           className="px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700 text-sm disabled:opacity-60"
         >
-          Send
+          {t("prompt.submit")}
         </button>
       </div>
       {error ? <ErrorBanner text={error} /> : null}
@@ -514,14 +494,14 @@ function SubmitRow({
         className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700 text-sm disabled:opacity-60"
       >
         <Send className="w-4 h-4" />
-        Submit
+        {t("prompt.submit")}
       </button>
       <button
         disabled={submitting}
         onClick={onExit}
         className="px-4 py-2 rounded-md border border-rose-300 bg-white hover:bg-rose-50 text-rose-700 text-sm"
       >
-        Stop optimization
+        {t("prompt.submit.exit")}
       </button>
     </div>
   );

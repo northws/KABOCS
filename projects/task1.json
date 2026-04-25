@@ -1,0 +1,66 @@
+{
+  "name": "task1",
+  "display_name": "CO2RR",
+  "description": "小优化",
+  "features": [
+    {
+      "name": "c_cat",
+      "type": "continuous",
+      "lo": 0.0,
+      "hi": 200.0,
+      "unit": "uM",
+      "display_name": null
+    },
+    {
+      "name": "c_ps",
+      "type": "continuous",
+      "lo": 0.0,
+      "hi": 10.0,
+      "unit": "mM",
+      "display_name": null
+    },
+    {
+      "name": "v_H2O",
+      "type": "continuous",
+      "lo": 0.0,
+      "hi": 0.5,
+      "unit": "mL",
+      "display_name": null
+    },
+    {
+      "name": "v_teoa",
+      "type": "continuous",
+      "lo": 0.0,
+      "hi": 0.5,
+      "unit": "mL",
+      "display_name": null
+    },
+    {
+      "name": "M",
+      "type": "integer",
+      "lo": 0.0,
+      "hi": 3.0,
+      "unit": "no.",
+      "display_name": null
+    },
+    {
+      "name": "sol",
+      "type": "integer",
+      "lo": 0.0,
+      "hi": 1.0,
+      "unit": "no.",
+      "display_name": null
+    }
+  ],
+  "targets": [
+    {
+      "short_name": "CO",
+      "column": "Y",
+      "display_name": "CO",
+      "unit": "%",
+      "is_competing": false
+    }
+  ],
+  "default_target": "CO",
+  "notes": ""
+}

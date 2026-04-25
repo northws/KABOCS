@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { t } from "../i18n";
 import type { LogEvent } from "../types";
 
 /** Scrolling log pane with colour-coded severity levels. */
@@ -17,7 +18,7 @@ export default function LogStream({ logs }: { logs: LogEvent[] }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-950 text-slate-100 overflow-hidden">
       <div className="px-3 py-2 border-b border-slate-800 text-xs text-slate-400 flex items-center justify-between">
-        <span>Log stream ({logs.length} lines)</span>
+        <span>{t("log.lines", { count: logs.length })}</span>
         <span className="font-mono">
           {logs.length > 0
             ? new Date(
@@ -32,7 +33,7 @@ export default function LogStream({ logs }: { logs: LogEvent[] }) {
       >
         {logs.length === 0 ? (
           <div className="text-slate-500">
-            (no logs yet — start a run to see the optimizer's output)
+            {t("log.none")}
           </div>
         ) : (
           logs.map((ev, i) => (

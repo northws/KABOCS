@@ -52,7 +52,7 @@ webui/frontend/.vite/
 # ========================================
 co2rr_optimizer.py
 reference/
-
+data/
 # ========================================
 # TeX / LaTeX build artifacts
 # ========================================

@@ -7,6 +7,7 @@ import PromptPanel from "./PromptPanel";
 import RecommendationList from "./RecommendationList";
 import { useEventStream } from "../hooks/useEventStream";
 import { abortRun, currentRunStatus, listTasks, startRun } from "../api";
+import { t } from "../i18n";
 import type {
   BestFoundEvent,
   KaboEvent,
@@ -63,21 +64,18 @@ export default function RunPage({ onStatusChange }: Props) {
 
   const { events, connected, clear: clearEvents } = useEventStream();
 
-  // Load registered tasks once.
   useEffect(() => {
     listTasks()
       .then((r) => {
         setTasks(r.tasks);
-        // Auto-select default task if the initial one isn't registered.
         if (!r.tasks.find((t) => t.name === config.task) && r.tasks.length > 0) {
           setConfig((c) => ({ ...c, task: r.tasks[0].name }));
         }
       })
-      .catch((e) => setError(`Failed to load tasks: ${e}`));
+      .catch((e) => setError(`${t("run.loading.tasks")} ${e}`));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll status (primary source of truth for the prompt modal).
   useEffect(() => {
     let alive = true;
     const tick = async () => {
@@ -127,7 +125,7 @@ export default function RunPage({ onStatusChange }: Props) {
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[420px_1fr] gap-6">
       <section className="space-y-4">
-        <Card title="Configuration">
+        <Card title={t("run.config")}>
           <ConfigPanel
             tasks={tasks}
             config={config}
@@ -143,7 +141,7 @@ export default function RunPage({ onStatusChange }: Props) {
                 onClick={handleAbort}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-rose-300 bg-white hover:bg-rose-50 text-rose-700 text-sm"
               >
-                <StopCircle className="w-4 h-4" /> Stop
+                <StopCircle className="w-4 h-4" /> {t("run.stop")}
               </button>
             ) : (
               <button
@@ -152,7 +150,7 @@ export default function RunPage({ onStatusChange }: Props) {
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-brand-600 text-white hover:bg-brand-700 text-sm disabled:opacity-60"
               >
                 <Play className="w-4 h-4" />
-                {starting ? "Starting…" : "Start run"}
+                {starting ? t("run.starting") : t("run.start")}
               </button>
             )}
             <StatusLabel status={status} connected={connected} />
@@ -164,7 +162,7 @@ export default function RunPage({ onStatusChange }: Props) {
           ) : null}
           {status.error ? (
             <div className="mt-3 text-xs text-rose-700 bg-rose-50 border border-rose-200 p-2 rounded">
-              Run error: <span className="font-mono">{status.error}</span>
+              {t("run.error")} <span className="font-mono">{status.error}</span>
             </div>
           ) : null}
         </Card>
@@ -224,10 +222,10 @@ function StatusLabel({
         }`}
       />
       <span className="text-slate-600">
-        stream {connected ? "connected" : "offline"}
+        {t("run.stream")} {connected ? t("run.stream.connected") : t("run.stream.offline")}
       </span>
       <span className="text-slate-400">·</span>
-      <span className="font-medium text-slate-700">status {txt}</span>
+      <span className="font-medium text-slate-700">{t("run.status")} {txt}</span>
       {status.run_id ? (
         <span className="text-slate-400 font-mono">· {status.run_id}</span>
       ) : null}
@@ -242,7 +240,7 @@ function BestCard({ best }: { best: BestFoundEvent }) {
   return (
     <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm">
       <div className="flex items-center gap-2 text-emerald-800 font-semibold mb-2">
-        <Trophy className="w-4 h-4" /> Best experiment so far
+        <Trophy className="w-4 h-4" /> {t("run.best")}
       </div>
       <div className="text-slate-700">
         <span className="font-semibold">{best.target_name}</span> ={" "}
@@ -267,7 +265,7 @@ function LifecycleCard({ ev }: { ev: KaboEvent }) {
   if (ev.type === "run_completed") {
     return (
       <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800 flex items-center gap-2">
-        <CheckCircle2 className="w-4 h-4" /> Run completed.
+        <CheckCircle2 className="w-4 h-4" /> {t("run.completed")}
       </div>
     );
   }
@@ -275,7 +273,7 @@ function LifecycleCard({ ev }: { ev: KaboEvent }) {
     return (
       <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
         <div className="flex items-center gap-2 mb-1 font-semibold">
-          <CircleSlash className="w-4 h-4" /> Run failed
+          <CircleSlash className="w-4 h-4" /> {t("run.failed")}
         </div>
         <div className="font-mono text-xs break-all">{ev.error}</div>
       </div>
@@ -284,8 +282,6 @@ function LifecycleCard({ ev }: { ev: KaboEvent }) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: derive the latest-of-kind views from the event stream.
 // ---------------------------------------------------------------------------
 function useDerived(events: KaboEvent[]) {
   return useMemo(() => {

@@ -12,6 +12,7 @@ import {
   listRuns,
   runFileUrl,
 } from "../api";
+import { t } from "../i18n";
 import type { ArchivedRun } from "../types";
 
 /** Historical run browser + inline viewer for metadata, data, and plots. */
@@ -66,7 +67,7 @@ export default function Dashboard() {
   }, [selected]);
 
   async function onDelete(run_id: string) {
-    if (!confirm(`Delete run ${run_id}?`)) return;
+    if (!confirm(t("dash.delete.confirm", { id: run_id }))) return;
     try {
       await deleteRun(run_id);
       if (selected === run_id) setSelected(null);
@@ -89,7 +90,7 @@ export default function Dashboard() {
     <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-6">
       <aside className="rounded-lg border border-slate-200 bg-white">
         <div className="px-3 py-2 border-b bg-slate-50 text-xs font-semibold uppercase text-slate-600 flex items-center justify-between">
-          <span>Archived runs ({runs.length})</span>
+          <span>{t("dash.title", { count: runs.length })}</span>
           <button
             onClick={refresh}
             className="p-1 rounded hover:bg-slate-200 text-slate-500"
@@ -100,7 +101,7 @@ export default function Dashboard() {
         <ul className="max-h-[520px] overflow-auto log-scroll">
           {runs.length === 0 ? (
             <li className="p-3 text-xs text-slate-400">
-              No archived runs yet. Start one from the Run tab.
+              {t("dash.none")}
             </li>
           ) : (
             runs.map((r) => (
@@ -145,7 +146,7 @@ export default function Dashboard() {
       <section className="space-y-4 min-w-0">
         {!selected ? (
           <div className="rounded-lg border border-slate-200 bg-white p-8 text-sm text-slate-500 text-center">
-            Pick an archived run from the sidebar to inspect it.
+            {t("dash.hint")}
           </div>
         ) : (
           <>
@@ -208,7 +209,7 @@ function SummaryCard({
   return (
     <div className="rounded-lg border border-slate-200 bg-white">
       <header className="px-4 py-3 border-b bg-slate-50 flex items-center gap-2">
-        <span className="text-sm font-semibold text-slate-700">Metadata</span>
+        <span className="text-sm font-semibold text-slate-700">{t("dash.metadata")}</span>
         <span className="text-xs text-slate-500 font-mono">({runId})</span>
         <div className="flex-1" />
         <a
@@ -241,7 +242,7 @@ function FeatureImportanceCard({ runId }: { runId: string }) {
       <header className="px-4 py-3 border-b bg-slate-50 flex items-center gap-2">
         <ImageIcon className="w-4 h-4 text-slate-500" />
         <span className="text-sm font-semibold text-slate-700">
-          Feature importances
+          {t("dash.feature_imp")}
         </span>
       </header>
       <div className="p-4">
@@ -252,7 +253,7 @@ function FeatureImportanceCard({ runId }: { runId: string }) {
           onError={(e) => {
             (e.target as HTMLImageElement).replaceWith(
               Object.assign(document.createElement("div"), {
-                innerText: "(image not available — feature selection was skipped?)",
+                innerText: t("dash.feature_imp.na"),
                 className: "text-xs text-slate-500",
               }),
             );
@@ -270,7 +271,7 @@ function BetaTraceCard({ values }: { values: number[] }) {
     <div className="rounded-lg border border-slate-200 bg-white">
       <header className="px-4 py-3 border-b bg-slate-50">
         <span className="text-sm font-semibold text-slate-700">
-          β schedule trace
+          {t("dash.beta_trace")}
         </span>
       </header>
       <div className="p-4">
@@ -324,7 +325,7 @@ function DataPreviewCard({
   if (!csv) {
     return (
       <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-500">
-        No updated dataset for this run.
+        {t("dash.data.none")}
       </div>
     );
   }
@@ -336,10 +337,10 @@ function DataPreviewCard({
     <div className="rounded-lg border border-slate-200 bg-white">
       <header className="px-4 py-3 border-b bg-slate-50 flex items-center gap-2">
         <span className="text-sm font-semibold text-slate-700">
-          data_updated.csv
+          {t("dash.data")}
         </span>
         <span className="text-xs text-slate-500">
-          {parsed.rows.length} rows · {parsed.headers.length} columns
+          {parsed.rows.length} {t("dash.data.rows")}· {parsed.headers.length} {t("dash.data.cols")}
         </span>
         <div className="flex-1" />
         <a
@@ -348,7 +349,7 @@ function DataPreviewCard({
           rel="noreferrer"
           className="text-xs text-slate-600 inline-flex items-center gap-1 hover:text-brand-700"
         >
-          <Download className="w-3.5 h-3.5" /> Download
+          <Download className="w-3.5 h-3.5" /> {t("data.download")}
         </a>
       </header>
       <div className="overflow-auto max-h-[400px] log-scroll">
@@ -426,7 +427,6 @@ function parseCsv(csv: string): {
 }
 
 function splitCsvLine(line: string): string[] {
-  // Simplistic split; KABO writes straightforward CSVs without quoting.
   return line.split(",");
 }
 

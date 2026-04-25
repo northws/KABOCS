@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Target } from "lucide-react";
+import { t } from "../i18n";
 import type { RecommendationsEvent } from "../types";
 
 /**
@@ -16,7 +17,7 @@ export default function RecommendationList({
     return (
       <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-500">
         <Target className="w-4 h-4 inline mr-2 text-slate-400" />
-        No recommendations yet for this run.
+        {t("rec.none")}
       </div>
     );
   }
@@ -27,10 +28,10 @@ export default function RecommendationList({
         <div className="flex items-center gap-2">
           <Target className="w-4 h-4 text-brand-600" />
           <span className="font-semibold text-slate-800">
-            Iteration {event.iteration} · Top {event.top_n} recommendations
+            {t("rec.title", { iteration: event.iteration, n: event.top_n })}
           </span>
           <span className="text-xs text-slate-500 ml-2">
-            optimizing {event.target_name}
+            {t("rec.optimizing", { target: event.target_name })}
             <span className="font-mono"> ({event.target_column})</span>
           </span>
         </div>
@@ -130,20 +131,20 @@ function OriginBadge({
     "px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider";
   if (origin === "selected") {
     return (
-      <span className={`${base} bg-brand-100 text-brand-700`}>selected</span>
+      <span className={`${base} bg-brand-100 text-brand-700`}>{t("rec.selected")}</span>
     );
   }
   if (origin === "expert") {
     return (
-      <span className={`${base} bg-amber-100 text-amber-700`}>expert</span>
+      <span className={`${base} bg-amber-100 text-amber-700`}>{t("rec.expert")}</span>
     );
   }
   if (origin === "fixed") {
     return (
       <span className={`${base} bg-slate-100 text-slate-500`}>
-        {isSelected ? "selected" : "fixed"}
+        {isSelected ? t("rec.selected") : t("rec.fixed")}
       </span>
     );
   }
-  return <span className={`${base} bg-rose-50 text-rose-500`}>pending</span>;
+  return <span className={`${base} bg-rose-50 text-rose-500`}>{t("rec.pending")}</span>;
 }

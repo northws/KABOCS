@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Info } from "lucide-react";
+import { t } from "../i18n";
 import type { RunConfig, TaskSchema } from "../types";
 
 interface Props {
@@ -40,17 +41,16 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
 
   return (
     <div className="space-y-6">
-      {/* Group: Core ------------------------------------------------ */}
       <fieldset className="space-y-3">
-        <Legend>Core</Legend>
+        <Legend>{t("config.core")}</Legend>
 
         <Grid2>
           <Field
-            label="Task"
+            label={t("config.task")}
             hint={
               isProjectTask
-                ? "project definition — edit in the Projects tab"
-                : "built-in (Python-defined)"
+                ? t("config.task.hint.project")
+                : t("config.task.hint.builtin")
             }
           >
             <select
@@ -60,7 +60,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
               onChange={(e) => onChange({ task: e.target.value })}
             >
               {builtinTasks.length > 0 && (
-                <optgroup label="Built-in">
+                <optgroup label={t("config.builtin")}>
                   {builtinTasks.map((t) => (
                     <option key={t.name} value={t.name}>
                       {t.display_name} ({t.name})
@@ -69,7 +69,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
                 </optgroup>
               )}
               {projectTasks.length > 0 && (
-                <optgroup label="Projects">
+                <optgroup label={t("config.project")}>
                   {projectTasks.map((t) => (
                     <option key={t.name} value={t.name}>
                       {t.display_name} ({t.name})
@@ -80,7 +80,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             </select>
           </Field>
 
-          <Field label="Target product">
+          <Field label={t("config.target")}>
             <select
               disabled={disabled || !currentTask}
               className={SELECT_CLS}
@@ -90,7 +90,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
               }
             >
               <option value="">
-                (default: {currentTask?.default_target ?? "—"})
+                {t("config.target.default")}{currentTask?.default_target ?? "—"}
               </option>
               {targetOptions.map((opt) => (
                 <option key={opt.col} value={opt.short}>
@@ -100,7 +100,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             </select>
           </Field>
 
-          <Field label="Data CSV">
+          <Field label={t("config.data")}>
             <input
               disabled={disabled}
               className={INPUT_CLS}
@@ -111,8 +111,8 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
           </Field>
 
           <Field
-            label="Candidates CSV"
-            hint="'none' to skip discrete pool"
+            label={t("config.candidates")}
+            hint={t("config.candidates.hint")}
           >
             <input
               disabled={disabled}
@@ -128,7 +128,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="Iterations">
+          <Field label={t("config.iterations")}>
             <input
               disabled={disabled}
               type="number"
@@ -141,7 +141,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="Top K features">
+          <Field label={t("config.topk")}>
             <input
               disabled={disabled}
               type="number"
@@ -154,7 +154,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="Seed">
+          <Field label={t("config.seed")}>
             <input
               disabled={disabled}
               type="number"
@@ -165,11 +165,11 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
                   seed: e.target.value === "" ? null : parseInt(e.target.value, 10),
                 })
               }
-              placeholder="(none)"
+              placeholder={t("config.seed.ph")}
             />
           </Field>
 
-          <Field label="Device">
+          <Field label={t("config.device")}>
             <select
               disabled={disabled}
               className={SELECT_CLS}
@@ -193,16 +193,16 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             }
           >
             <span className="font-semibold uppercase tracking-wide">
-              {isProjectTask ? "Project" : "Built-in"}
+              {isProjectTask ? t("config.project") : t("config.builtin")}
             </span>
             <span className="font-mono text-slate-500">
-              {currentTask.features.length} features
+              {currentTask.features.length} {t("config.features")}
             </span>
             <span className="font-mono text-slate-500">
-              {currentTask.all_product_columns.length} products
+              {currentTask.all_product_columns.length} {t("config.products")}
             </span>
             <span className="text-slate-500">
-              default target →{" "}
+              {t("config.default_target")}{" "}
               <span className="font-mono">{currentTask.default_target}</span>
             </span>
           </div>
@@ -213,34 +213,33 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             disabled={disabled}
             checked={config.interactive}
             onChange={(v) => onChange({ interactive: v })}
-            label="Interactive (expert-in-the-loop)"
+            label={t("config.interactive")}
           />
           <Checkbox
             disabled={disabled}
             checked={config.skip_feature_selection}
             onChange={(v) => onChange({ skip_feature_selection: v })}
-            label="Skip feature selection"
+            label={t("config.skip_fs")}
           />
           <Checkbox
             disabled={disabled}
             checked={config.strict_training_schema}
             onChange={(v) => onChange({ strict_training_schema: v })}
-            label="Strict training schema"
+            label={t("config.strict_schema")}
           />
           <Checkbox
             disabled={disabled}
             checked={config.pre_fill_before_choice}
             onChange={(v) => onChange({ pre_fill_before_choice: v })}
-            label="Pre-fill recipes before choice"
+            label={t("config.prefill")}
           />
         </div>
       </fieldset>
 
-      {/* Group: Acquisition ---------------------------------------- */}
       <fieldset className="space-y-3">
-        <Legend>Acquisition</Legend>
+        <Legend>{t("config.acq")}</Legend>
         <Grid2>
-          <Field label="Strategy">
+          <Field label={t("config.strategy")}>
             <select
               disabled={disabled}
               className={SELECT_CLS}
@@ -252,7 +251,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             </select>
           </Field>
 
-          <Field label="Kernel">
+          <Field label={t("config.kernel")}>
             <select
               disabled={disabled}
               className={SELECT_CLS}
@@ -264,7 +263,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             </select>
           </Field>
 
-          <Field label="β">
+          <Field label={t("config.beta")}>
             <input
               disabled={disabled}
               type="number"
@@ -277,7 +276,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="β schedule">
+          <Field label={t("config.beta_schedule")}>
             <select
               disabled={disabled}
               className={SELECT_CLS}
@@ -290,7 +289,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             </select>
           </Field>
 
-          <Field label="β δ">
+          <Field label={t("config.beta_delta")}>
             <input
               disabled={disabled}
               type="number"
@@ -305,7 +304,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="qNEI MC samples">
+          <Field label={t("config.qnei_mc")}>
             <input
               disabled={disabled}
               type="number"
@@ -318,7 +317,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="H₂ penalty weight">
+          <Field label={t("config.h2_penalty")}>
             <input
               disabled={disabled}
               type="number"
@@ -332,7 +331,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="Diversity weight">
+          <Field label={t("config.diversity")}>
             <input
               disabled={disabled}
               type="number"
@@ -346,7 +345,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="Discrete strategy">
+          <Field label={t("config.discrete_strategy")}>
             <select
               disabled={disabled}
               className={SELECT_CLS}
@@ -358,7 +357,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             </select>
           </Field>
 
-          <Field label="Generated candidates N">
+          <Field label={t("config.gen_candidates_n")}>
             <input
               disabled={disabled}
               type="number"
@@ -379,25 +378,24 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             disabled={disabled}
             checked={config.prefer_file_candidates}
             onChange={(v) => onChange({ prefer_file_candidates: v })}
-            label="Prefer candidates CSV over generator"
+            label={t("config.prefer_csv")}
           />
         </div>
       </fieldset>
 
-      {/* Group: KABO ----------------------------------------------- */}
       <fieldset className="space-y-3">
-        <Legend>KABO mode</Legend>
+        <Legend>{t("config.kabo")}</Legend>
         <div className="flex flex-wrap gap-3 text-sm">
           <Checkbox
             disabled={disabled}
             checked={config.kabo_mode}
             onChange={(v) => onChange({ kabo_mode: v })}
-            label="Enable knowledge-augmented mode"
+            label={t("config.kabo.enable")}
           />
         </div>
 
         <Grid2>
-          <Field label="λ_p (preference)">
+          <Field label={t("config.kabo.lambda_p")}>
             <input
               disabled={disabled || !config.kabo_mode}
               type="number"
@@ -410,7 +408,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="λ_k (expert prior)">
+          <Field label={t("config.kabo.lambda_k")}>
             <input
               disabled={disabled || !config.kabo_mode}
               type="number"
@@ -423,7 +421,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="λ_v (VOI)">
+          <Field label={t("config.kabo.lambda_v")}>
             <input
               disabled={disabled || !config.kabo_mode}
               type="number"
@@ -436,7 +434,7 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
             />
           </Field>
 
-          <Field label="PE budget / iter">
+          <Field label={t("config.kabo.pe_budget")}>
             <input
               disabled={disabled || !config.kabo_mode}
               type="number"
@@ -450,8 +448,8 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
           </Field>
 
           <Field
-            label="Expert prior JSON"
-            hint="relative to project root"
+            label={t("config.kabo.prior")}
+            hint={t("config.kabo.prior.hint")}
           >
             <input
               disabled={disabled || !config.kabo_mode}
@@ -470,18 +468,13 @@ export default function ConfigPanel({ tasks, config, onChange, disabled }: Props
 
         <div className="flex items-start gap-2 text-xs text-slate-500">
           <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-          <span>
-            PE queries (<code className="text-xs">pe_budget &gt; 0</code>) use
-            generic text prompts in the web UI. Set to 0 unless you need
-            preference exploration.
-          </span>
+          <span>{t("config.kabo.pe_hint")}</span>
         </div>
       </fieldset>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
 function Legend({ children }: { children: React.ReactNode }) {
   return (
     <legend className="text-xs font-semibold uppercase tracking-wider text-slate-500">

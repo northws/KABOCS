@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Beaker,
   Database,
@@ -7,6 +7,7 @@ import {
   History,
   Sparkles,
   RefreshCw,
+  Languages,
 } from "lucide-react";
 
 import RunPage from "./components/RunPage";
@@ -16,21 +17,27 @@ import ProjectsManager from "./components/ProjectsManager";
 import Dashboard from "./components/Dashboard";
 import type { StatusResponse } from "./types";
 import { currentRunStatus } from "./api";
+import { t, useLang, setLang } from "./i18n";
 
 type Tab = "run" | "projects" | "data" | "priors" | "history";
 
-const TABS: Array<{ key: Tab; label: string; icon: React.ReactNode }> = [
-  { key: "run", label: "Run", icon: <Sparkles className="w-4 h-4" /> },
-  { key: "projects", label: "Projects", icon: <FlaskConical className="w-4 h-4" /> },
-  { key: "data", label: "Data", icon: <Database className="w-4 h-4" /> },
-  { key: "priors", label: "Priors", icon: <FolderKanban className="w-4 h-4" /> },
-  { key: "history", label: "History", icon: <History className="w-4 h-4" /> },
-];
-
 export default function App() {
+  const lang = useLang();
   const [tab, setTab] = useState<Tab>("run");
   const [status, setStatus] = useState<StatusResponse>({ status: "idle" });
   const [pulse, setPulse] = useState(0);
+
+  const tabs = useMemo<Array<{ key: Tab; label: string; icon: React.ReactNode }>>(
+    () => [
+      { key: "run", label: t("tab.run"), icon: <Sparkles className="w-4 h-4" /> },
+      { key: "projects", label: t("tab.projects"), icon: <FlaskConical className="w-4 h-4" /> },
+      { key: "data", label: t("tab.data"), icon: <Database className="w-4 h-4" /> },
+      { key: "priors", label: t("tab.priors"), icon: <FolderKanban className="w-4 h-4" /> },
+      { key: "history", label: t("tab.history"), icon: <History className="w-4 h-4" /> },
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lang],
+  );
 
   // Lightweight polling to keep the top-bar badge current.
   useEffect(() => {
@@ -52,23 +59,28 @@ export default function App() {
   }, [pulse]);
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <TopBar status={status} onRefresh={() => setPulse((p) => p + 1)} />
+    <div className="min-h-screen flex flex-col" key={lang}>
+      <TopBar
+        status={status}
+        onRefresh={() => setPulse((p) => p + 1)}
+        lang={lang}
+        onToggleLang={() => setLang(lang === "zh" ? "en" : "zh")}
+      />
 
       <nav className="border-b bg-white">
         <div className="max-w-7xl mx-auto px-6 flex gap-1">
-          {TABS.map((t) => (
+          {tabs.map((item) => (
             <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
+              key={item.key}
+              onClick={() => setTab(item.key)}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                tab === t.key
+                tab === item.key
                   ? "border-brand-600 text-brand-700"
                   : "border-transparent text-slate-600 hover:text-slate-900"
               }`}
             >
-              {t.icon}
-              {t.label}
+              {item.icon}
+              {item.label}
             </button>
           ))}
         </div>
@@ -83,8 +95,7 @@ export default function App() {
       </main>
 
       <footer className="border-t bg-white py-3 text-center text-xs text-slate-500">
-        KABOCS WebUI · Knowledge-Augmented Bayesian Optimization for Catalytic
-        Systems
+        {t("app.footer")}
       </footer>
     </div>
   );
@@ -93,9 +104,13 @@ export default function App() {
 function TopBar({
   status,
   onRefresh,
+  lang,
+  onToggleLang,
 }: {
   status: StatusResponse;
   onRefresh: () => void;
+  lang: "zh" | "en";
+  onToggleLang: () => void;
 }) {
   const color =
     status.status === "running"
@@ -112,9 +127,9 @@ function TopBar({
       <div className="max-w-7xl mx-auto px-6 h-14 flex items-center gap-3">
         <Beaker className="w-6 h-6 text-brand-600" />
         <div>
-          <div className="font-semibold leading-tight">KABOCS</div>
+          <div className="font-semibold leading-tight">{t("topbar.title")}</div>
           <div className="text-[11px] text-slate-500 leading-tight">
-            Knowledge-Augmented Bayesian Optimization
+            {t("topbar.subtitle")}
           </div>
         </div>
         <div className="flex-1" />
@@ -129,9 +144,17 @@ function TopBar({
           ) : null}
         </span>
         <button
+          onClick={onToggleLang}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-200 hover:bg-slate-100 text-slate-600 text-xs font-medium"
+          title={lang === "zh" ? "Switch to English" : "切换为中文"}
+        >
+          <Languages className="w-3.5 h-3.5" />
+          {lang === "zh" ? "EN" : "中"}
+        </button>
+        <button
           onClick={onRefresh}
           className="p-1.5 rounded-md hover:bg-slate-100 text-slate-600"
-          title="Refresh status"
+          title={t("topbar.refresh")}
         >
           <RefreshCw className="w-4 h-4" />
         </button>
