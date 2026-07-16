@@ -302,18 +302,20 @@ class KABOEngine:
         ``q`` candidates.
 
         Falls through to the same ``optimize_continuous_batch`` helper
-        used by single-objective mode, so integer-snap / batch / random
-        fallback behaviour is consistent.  When ``q == 1`` (the common
-        case), this matches :meth:`suggest_continuous` in surface.
+        used by single-objective mode, so integer/categorical-snap /
+        batch / random fallback behaviour is consistent.  When ``q == 1``
+        (the common case), this matches :meth:`suggest_continuous` in
+        surface.
         """
         from kabo.acquisition import optimize_continuous_batch
 
         if self.mo_surrogate is None:
             raise RuntimeError("MO surrogate not fit.")
+        # All submodels share the same design bounds and type metadata.
         return optimize_continuous_batch(
             acq_func, dim, q, self.device,
             self.n_restarts, self.raw_samples,
-            integer_indices=self.mo_surrogate.submodels[0].integer_indices,
+            integer_indices=self.mo_surrogate.submodels[0].snap_indices,
             bounds_raw=self.mo_surrogate.bounds_raw,
         )
 
@@ -434,14 +436,14 @@ class KABOEngine:
         """Optimize the acquisition function over ``[0, 1]^dim``.
 
         When the surrogate was fit with ``feature_types`` declaring
-        integer dims, those dims are snapped to their raw integer grid
-        after continuous optimization (round-trick) and the acquisition
-        value is recomputed on the snapped point.
+        integer or categorical dims, those dims are snapped to their raw
+        integer grid after continuous optimization (round-trick) and the
+        acquisition value is recomputed on the snapped point.
         """
         return optimize_continuous(
             acq_func, dim, self.device,
             self.n_restarts, self.raw_samples,
-            integer_indices=self.surrogate.integer_indices,
+            integer_indices=self.surrogate.snap_indices,
             bounds_raw=self.surrogate.bounds_raw,
         )
 
@@ -454,7 +456,7 @@ class KABOEngine:
         """Propose ``q`` diverse continuous candidates in one call.
 
         Thin wrapper around :func:`kabo.acquisition.optimize_continuous_batch`
-        that injects the engine's integer-dim / bounds context.  For
+        that injects the engine's snap-dim / bounds context.  For
         ``q == 1`` the behaviour is identical to ``suggest_continuous``.
 
         Parameters
@@ -477,7 +479,7 @@ class KABOEngine:
         return optimize_continuous_batch(
             acq_func, dim, q, self.device,
             self.n_restarts, self.raw_samples,
-            integer_indices=self.surrogate.integer_indices,
+            integer_indices=self.surrogate.snap_indices,
             bounds_raw=self.surrogate.bounds_raw,
         )
 

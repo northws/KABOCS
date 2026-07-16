@@ -17,7 +17,7 @@ from kabo.task import TASK_REGISTRY, TaskBase, TestTask, get_task
 class TestRegistry:
     def test_builtin_tasks_registered(self):
         keys = set(TASK_REGISTRY)
-        assert {"co2rr", "test"}.issubset(keys)
+        assert {"co2rr", "eco2rr", "test"}.issubset(keys)
 
     def test_get_task_is_case_insensitive(self):
         a = get_task("test")

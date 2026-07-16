@@ -119,6 +119,25 @@ class SurrogateModel:
         self.gp_model_type: str = "exact"
         self.num_inducing_points: Optional[int] = None
 
+    @property
+    def snap_indices(self) -> list[int]:
+        """Dims that must be snapped back onto a raw integer grid.
+
+        ``optimize_acqf`` relaxes every dim to a continuous box, so any
+        dim that is not genuinely continuous comes back fractional and
+        must be rounded before it is shown to a user or scored.
+
+        Both integer and categorical / ordinal dims qualify: categorical
+        features are ordinal-encoded (``0 … n-1``) with design-space
+        bounds to match, so they live on exactly the same unit-integer
+        grid as a plain integer dim and snap identically.  Without this,
+        a categorical dim would surface as e.g. ``Metal_identity = 2.37``,
+        which decodes to no category at all.
+        """
+        return sorted(
+            set(self.integer_indices) | set(self.categorical_indices)
+        )
+
     def fit(
         self,
         X_raw: np.ndarray,
