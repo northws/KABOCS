@@ -302,18 +302,20 @@ class KABOEngine:
         ``q`` candidates.
 
         Falls through to the same ``optimize_continuous_batch`` helper
-        used by single-objective mode, so integer-snap / batch / random
-        fallback behaviour is consistent.  When ``q == 1`` (the common
-        case), this matches :meth:`suggest_continuous` in surface.
+        used by single-objective mode, so integer/categorical-snap /
+        batch / random fallback behaviour is consistent.  When ``q == 1``
+        (the common case), this matches :meth:`suggest_continuous` in
+        surface.
         """
         from kabo.acquisition import optimize_continuous_batch
 
         if self.mo_surrogate is None:
             raise RuntimeError("MO surrogate not fit.")
+        # All submodels share the same design bounds and type metadata.
         return optimize_continuous_batch(
             acq_func, dim, q, self.device,
             self.n_restarts, self.raw_samples,
-            integer_indices=self.mo_surrogate.submodels[0].integer_indices,
+            integer_indices=self.mo_surrogate.submodels[0].snap_indices,
             bounds_raw=self.mo_surrogate.bounds_raw,
         )
 
@@ -434,14 +436,14 @@ class KABOEngine:
         """Optimize the acquisition function over ``[0, 1]^dim``.
 
         When the surrogate was fit with ``feature_types`` declaring
-        integer dims, those dims are snapped to their raw integer grid
-        after continuous optimization (round-trick) and the acquisition
-        value is recomputed on the snapped point.
+        integer or categorical dims, those dims are snapped to their raw
+        integer grid after continuous optimization (round-trick) and the
+        acquisition value is recomputed on the snapped point.
         """
         return optimize_continuous(
             acq_func, dim, self.device,
             self.n_restarts, self.raw_samples,
-            integer_indices=self.surrogate.integer_indices,
+            integer_indices=self.surrogate.snap_indices,
             bounds_raw=self.surrogate.bounds_raw,
         )
 
@@ -454,7 +456,7 @@ class KABOEngine:
         """Propose ``q`` diverse continuous candidates in one call.
 
         Thin wrapper around :func:`kabo.acquisition.optimize_continuous_batch`
-        that injects the engine's integer-dim / bounds context.  For
+        that injects the engine's snap-dim / bounds context.  For
         ``q == 1`` the behaviour is identical to ``suggest_continuous``.
 
         Parameters
@@ -477,7 +479,7 @@ class KABOEngine:
         return optimize_continuous_batch(
             acq_func, dim, q, self.device,
             self.n_restarts, self.raw_samples,
-            integer_indices=self.surrogate.integer_indices,
+            integer_indices=self.surrogate.snap_indices,
             bounds_raw=self.surrogate.bounds_raw,
         )
 
@@ -500,12 +502,25 @@ class KABOEngine:
         ``all_feature_columns`` and ``design_bounds`` must be supplied by
         the orchestrator (originating from the active ``Task``) so that
         the engine itself carries no domain-specific defaults.
+
+        Reads bounds through the :attr:`bounds_raw` property rather than
+        off ``self.surrogate`` directly, so that multi-objective runs —
+        where only the MO surrogate is ever fit — can rank a discrete
+        pool instead of raising "surrogate must be fit".
         """
-        if self.surrogate.bounds_raw is None:
+        bounds_raw = self.bounds_raw
+        if bounds_raw is None:
             raise RuntimeError(
                 "Surrogate must be fit before evaluating discrete candidates."
             )
         if self.discrete_strategy == "thompson":
+            if self.is_multi_objective:
+                raise RuntimeError(
+                    "discrete_strategy='thompson' is not supported in "
+                    "multi-objective mode: sampling a scalar posterior from "
+                    "a ModelListGP is ambiguous. Use the default "
+                    "discrete_strategy='acq' (qNEHVI) instead."
+                )
             if self.surrogate.model is None:
                 raise RuntimeError(
                     "Surrogate model is None; cannot run Thompson sampling."
@@ -513,14 +528,14 @@ class KABOEngine:
             return evaluate_discrete_thompson(
                 self.surrogate.model,
                 candidates_df, selected_features,
-                self.surrogate.bounds_raw, self.device,
+                bounds_raw, self.device,
                 all_feature_columns=all_feature_columns,
                 design_bounds=design_bounds,
             )
         # Default: acquisition-function scoring.
         return evaluate_discrete_candidates(
             acq_func, candidates_df, selected_features,
-            self.surrogate.bounds_raw, self.device,
+            bounds_raw, self.device,
             all_feature_columns=all_feature_columns,
             design_bounds=design_bounds,
         )

@@ -82,6 +82,7 @@ python webui/run_webui.py    # 打开 http://127.0.0.1:8000
 | Task | 文件 | 用途 |
 |---|---|---|
 | `CO2RRTask` | `kabo/task/co2rr.py` | 光催化 CO₂ 还原（19 特征 / 7 产物） |
+| `ECO2RRTask` | `kabo/task/eco2rr.py` | **电催化 CO₂ 还原（19 特征 / 8 产物，含 3 个类别特征）** |
 | `TestTask` | `kabo/task/test_task.py` | 3 特征 / 1 产物，端到端 smoke 测试 |
 
 ---
@@ -90,7 +91,8 @@ python webui/run_webui.py    # 打开 http://127.0.0.1:8000
 
 | 能力 | CLI 标志 | 说明 |
 |---|---|---|
-| **多目标 BO (qNEHVI)** | `--multi-objective --objectives CO H2 --ref-point 0 5` | `ModelListGP`（每个目标一条 GP）+ `qNoisyExpectedHypervolumeImprovement` 采集，内置 Task 预设（`TestTask`: y/y2；`CO2RRTask`: CO 最大化 vs HER 最小化）；运行结束写 `pareto_front.csv` + `pareto_front.png`，`ObjectiveSpec(direction="min")` 自动符号翻转 |
+| **电催化 CO₂RR 体系** | `--task eco2rr` | 新增 `ECO2RRTask`（19 特征 / 8 产物 FE%），与光催化 `CO2RRTask` 并存；首个使用**类别特征**的 Task（金属 / 阳离子 / 电解池类型），自动路由 `MixedSingleTaskGP`；产物受 FE 总和 ≤ 100% 约束 |
+| **多目标 BO (qNEHVI)** | `--multi-objective --objectives CO H2 --ref-point 0 5` | `ModelListGP`（每个目标一条 GP）+ `qNoisyExpectedHypervolumeImprovement` 采集，内置 Task 预设（`TestTask`: y/y2；`CO2RRTask`: CO 最大化 vs HER 最小化；`ECO2RRTask`: FE_CO 最大化 vs FE_H2 最小化）；运行结束写 `pareto_front.csv` + `pareto_front.png`，`ObjectiveSpec(direction="min")` 自动符号翻转 |
 | **稀疏 / 变分 GP (SVGP)** | `--gp-model auto` (默认) / `variational` / `exact` · `--num-inducing-points 100` | 大数据集场景切 BoTorch `SingleTaskVariationalGP`，Adam + `VariationalELBO` 训练，O(N·m²) 替代 ExactGP 的 O(N³)。`auto` 在 N ≥ 200 且无类别维时自动升档；类别任务或小数据自动留在 ExactGP。采集函数（UCB/qNEI/qNEHVI）无需改造 |
 | **ExpertPrior 分布扩展** | `--expert-prior-file priors/my_prior.json` | 新增 Beta（浓度/比例）、Log-Normal（正值偏斜）、Categorical（类别特征）分布，支持多先验组合与可微 log-score 评估 |
 | **特征选择扩展** | `--fs-method rf` (默认) / `permutation` / `mutual_info` / `shap` · `--permutation-repeats 10` · `--mi-neighbors 3` · `--correlation-heatmap` | 新增排列重要性、互信息、SHAP 值三种特征排序方法；可选生成特征相关性热力图 `correlation_heatmap.png` |
@@ -244,6 +246,47 @@ python -m kabo --task co2rr --kabo-mode \
                --pe-strategy random --pe-pool-cap 30 \
                --expert-prior-file priors/my_prior.json --iterations 20
 ```
+
+### 电催化 CO₂RR 体系（`ECO2RRTask`）
+
+**背景**：`CO2RRTask` 描述的是**光催化** CO₂ 还原（MOF / 光敏剂 / 牺牲剂）。电催化 CO₂RR 的驱动力是**外加电极电位**而非光激发，描述符落在电极、电解液与电解池工程上，产物以**法拉第效率（FE%）** 而非产率报告。因此它是一个独立的 Task，而不是对光催化 Task 的改写 —— 两者并存，互不影响。
+
+- **19 描述符**（与光催化同构的规模）：
+
+  | 分组 | 描述符 |
+  |---|---|
+  | 催化剂（6） | `Metal_identity`★ / `Metal_CO_binding_energy` / `Metal_H_binding_energy` / `Metal_d_electron_count`◆ / `Particle_size` / `Roughness_factor` |
+  | 电极 · GDE（3） | `Catalyst_loading` / `Ionomer_loading` / `Catalyst_layer_thickness` |
+  | 电解液（5） | `Cation`★ / `Cation_charge`◆ / `Electrolyte_concentration` / `Electrolyte_pH` / `Electrolyte_conductivity` |
+  | 电解池 · 操作（5） | `Cell_type`★ / `Applied_potential` / `CO2_partial_pressure` / `CO2_flow_rate` / `Temperature` |
+
+  ★ = 类别特征（categorical）　◆ = 整数特征（integer）　其余 14 个为连续特征
+
+- **类别特征**（本项目首个使用 categorical 的 Task）：`Metal_identity`（Cu / Ag / Au / Zn / Sn / Bi）、`Cation`（Li / Na / K / Cs）、`Cell_type`（H-cell / flow-cell / MEA）。声明为 `"categorical"` 后代理模型自动切 `MixedSingleTaskGP`（这些维走 `CategoricalKernel`），避免 GP 把「Ag 和 Au 之间」当成一个真实电极。
+  - **序数编码**：类别在 DataFrame / `candidates.csv` 里以其在 `categorical_values()` 中的下标存储（Cu→0, Ag→1 …），设计空间边界相应为 `(0, n-1)`。`ECO2RRTask.encode_categorical()` / `decode_categorical()` 是该映射的唯一定义处，交互提示用它把 `0.0` 还原成 `Cu`。
+  - **与连续描述符并存**：本 Task 同时保留 `Metal_identity` 与 `Metal_*_binding_energy` —— 前者捕捉金属特异性（如 Cu 独有的 C–C 偶联能力），后者捕捉 scaling relation，二者信息互补。
+  - ⚠ 类别维会让 `--gp-model auto` 永远留在 ExactGP（SVGP 无 Mixed 对应实现），见上文 SVGP 自动路由规则。
+- **8 个产物（FE%）**：`FE_CO` / `FE_HCOOH` / `FE_CH4` / `FE_C2H4` / `FE_CH3OH` / `FE_C2H5OH` / `FE_C3H7OH` / `FE_H2`。相比光催化多出 n-丙醇（Cu 在高过电位下有可测的 C3 选择性）；列名前缀 `FE_` 与光催化的 `Y_` 天然区分，同一个 `data/` 目录不会混淆。
+- **FE 预算约束**：单次测量的各产物 FE 非负且总和 ≤ 100%（其余为未计电荷）。交互录入时总和超 100% 会告警（不拒绝 —— 真实测量会因标定误差轻微溢出）；演示模式的 `simulate_observation` 则按比例整体缩放以严格守住该上限。
+- **HER 惩罚**：`--h2-penalty-weight` 对 `FE_H2` 生效（光催化 Task 打的是 `Y_H2`）。电催化里 HER 与目标反应**共用同一外加电位和质子源**，竞争比光催化更激烈，因此该惩罚在这里更有意义。
+- **多目标预设**：`max FE_CO` vs `min FE_H2`。因 FE 总和受限于 100%，每一个百分点的 HER 都直接从碳产物里扣除，帕累托前沿比光催化更陡。
+- **动态候选池**：`generate_candidates()` 对类别维做**穷举**而非采样 —— 6 金属 × 4 阳离子 × 3 电解池 = 72 种组合平铺到 n 行，保证小 n 时也不会漏掉某个电极/阳离子组合；连续维走 Sobol，整数维均匀采样。
+
+```bash
+# 示例 8：电催化 CO2RR，惩罚 HER
+python -m kabo --task eco2rr --target-product CO \
+               --h2-penalty-weight 0.3 --iterations 20 --seed 42
+
+# 示例 9：电催化多目标（FE_CO 最大化 vs FE_H2 最小化，使用 Task 预设）
+python -m kabo --task eco2rr --multi-objective \
+               --iterations 20 --seed 42
+
+# 示例 10：优化 C2H4（Cu 电极的 C2+ 路径）
+python -m kabo --task eco2rr --target-product C2H4 \
+               --h2-penalty-weight 0.2 --iterations 20
+```
+
+> **类别维与采集函数**：`optimize_acqf` 把所有维松弛到连续盒子上求解，因此类别 / 整数维返回后必须snap 回整数网格 —— 否则会出现 `Metal_identity = 2.37` 这种解码不出任何金属的推荐。`SurrogateModel.snap_indices` 统一给出「整数 ∪ 类别」的维索引，`suggest_continuous` / `suggest_continuous_batch` / `suggest_mo_continuous` 三条路径都用它。
 
 ### WebUI 多会话机制
 
@@ -536,7 +579,8 @@ ml-co2rr/
 │  ├─ task/                    # 体系实现
 │  │  ├─ __init__.py
 │  │  ├─ base.py               # TaskBase + TASK_REGISTRY
-│  │  ├─ co2rr.py              # CO2RRTask
+│  │  ├─ co2rr.py              # CO2RRTask（光催化）
+│  │  ├─ eco2rr.py             # ECO2RRTask（电催化）
 │  │  └─ test_task.py          # TestTask（smoke 基线）
 │  ├─ surrogate.py             # GP 代理模型
 │  ├─ acquisition.py           # UCB / qNEI / KABO / 交互工具
