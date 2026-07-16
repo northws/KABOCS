@@ -173,3 +173,92 @@ class TestCO2RRPreset:
         assert "Y_H2" in cols
         # H2 is the HER side reaction — must be minimised.
         assert directions[cols.index("Y_H2")] == "min"
+
+
+# =============================================================================
+#  Discrete candidate pool in MO mode
+# =============================================================================
+@pytest.mark.requires_torch
+class TestEvaluateDiscreteInMOMode:
+    """MO mode never fits the single-objective surrogate, so anything that
+    reads bounds off ``engine.surrogate`` directly breaks the moment a run
+    also has a discrete candidate pool — which is every built-in Task that
+    implements ``generate_candidates()``, plus any ``--candidates x.csv``.
+    """
+
+    @pytest.fixture
+    def fitted_engine(self):
+        import torch
+
+        from kabo.engine import KABOEngine
+
+        rng = np.random.default_rng(0)
+        features = ["x1", "x2", "x3"]
+        bounds = {f: (0.0, 1.0) for f in features}
+        X = rng.random((12, 3))
+        # Two objectives: one to maximise, one to minimise.
+        Y = np.column_stack([X.sum(axis=1), X[:, 0] * 2.0])
+
+        engine = KABOEngine(device=torch.device("cpu"))
+        engine.fit_mo_surrogate(
+            X, Y, features, design_bounds=bounds,
+            objectives=[
+                ObjectiveSpec(column="a", direction="max"),
+                ObjectiveSpec(column="b", direction="min"),
+            ],
+        )
+        return engine, features, bounds
+
+    def test_single_objective_surrogate_is_never_fit(self, fitted_engine):
+        """Guards the premise of this whole test class."""
+        engine, _, _ = fitted_engine
+        assert engine.is_multi_objective
+        assert engine.surrogate.bounds_raw is None
+
+    def test_ranks_a_discrete_pool_without_raising(self, fitted_engine):
+        engine, features, bounds = fitted_engine
+        acq = engine.build_mo_acquisition(ref_point_signed=[-0.1, -0.1])
+        pool = pd.DataFrame(
+            np.random.default_rng(1).random((5, 3)), columns=features,
+        )
+
+        results = engine.evaluate_discrete(
+            acq, pool, features,
+            all_feature_columns=features,
+            design_bounds=bounds,
+        )
+
+        assert len(results) == len(pool)
+        for cand, value, orig_idx in results:
+            assert cand.shape[-1] == len(features)
+            assert np.isfinite(float(value))
+            assert 0 <= orig_idx < len(pool)
+
+    def test_thompson_reports_that_it_is_unsupported(self, fitted_engine):
+        """Thompson sampling off a ModelListGP is ambiguous; the old code
+        surfaced this as a misleading "surrogate must be fit"."""
+        engine, features, bounds = fitted_engine
+        engine.discrete_strategy = "thompson"
+        pool = pd.DataFrame(
+            np.random.default_rng(1).random((3, 3)), columns=features,
+        )
+
+        with pytest.raises(RuntimeError, match="not supported in"):
+            engine.evaluate_discrete(
+                None, pool, features,
+                all_feature_columns=features,
+                design_bounds=bounds,
+            )
+
+    def test_still_raises_when_nothing_is_fit(self):
+        import torch
+
+        from kabo.engine import KABOEngine
+
+        engine = KABOEngine(device=torch.device("cpu"))
+        with pytest.raises(RuntimeError, match="must be fit"):
+            engine.evaluate_discrete(
+                None, pd.DataFrame({"x1": [0.5]}), ["x1"],
+                all_feature_columns=["x1"],
+                design_bounds={"x1": (0.0, 1.0)},
+            )

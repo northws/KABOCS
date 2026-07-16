@@ -500,12 +500,25 @@ class KABOEngine:
         ``all_feature_columns`` and ``design_bounds`` must be supplied by
         the orchestrator (originating from the active ``Task``) so that
         the engine itself carries no domain-specific defaults.
+
+        Reads bounds through the :attr:`bounds_raw` property rather than
+        off ``self.surrogate`` directly, so that multi-objective runs —
+        where only the MO surrogate is ever fit — can rank a discrete
+        pool instead of raising "surrogate must be fit".
         """
-        if self.surrogate.bounds_raw is None:
+        bounds_raw = self.bounds_raw
+        if bounds_raw is None:
             raise RuntimeError(
                 "Surrogate must be fit before evaluating discrete candidates."
             )
         if self.discrete_strategy == "thompson":
+            if self.is_multi_objective:
+                raise RuntimeError(
+                    "discrete_strategy='thompson' is not supported in "
+                    "multi-objective mode: sampling a scalar posterior from "
+                    "a ModelListGP is ambiguous. Use the default "
+                    "discrete_strategy='acq' (qNEHVI) instead."
+                )
             if self.surrogate.model is None:
                 raise RuntimeError(
                     "Surrogate model is None; cannot run Thompson sampling."
@@ -513,14 +526,14 @@ class KABOEngine:
             return evaluate_discrete_thompson(
                 self.surrogate.model,
                 candidates_df, selected_features,
-                self.surrogate.bounds_raw, self.device,
+                bounds_raw, self.device,
                 all_feature_columns=all_feature_columns,
                 design_bounds=design_bounds,
             )
         # Default: acquisition-function scoring.
         return evaluate_discrete_candidates(
             acq_func, candidates_df, selected_features,
-            self.surrogate.bounds_raw, self.device,
+            bounds_raw, self.device,
             all_feature_columns=all_feature_columns,
             design_bounds=design_bounds,
         )
