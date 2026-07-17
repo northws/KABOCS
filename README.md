@@ -83,6 +83,7 @@ python webui/run_webui.py    # 打开 http://127.0.0.1:8000
 |---|---|---|
 | `CO2RRTask` | `kabo/task/co2rr.py` | 光催化 CO₂ 还原（19 特征 / 7 产物） |
 | `ECO2RRTask` | `kabo/task/eco2rr.py` | **电催化 CO₂ 还原（19 特征 / 8 产物，含 3 个类别特征）** |
+| `PeptideECO2RRTask` | `kabo/task/peptide_eco2rr.py` | **肽配体电催化 CO₂RR（7 连续特征 / 10 气相产物）；配体以氨基酸描述符编码，可外推到未测残基** |
 | `TestTask` | `kabo/task/test_task.py` | 3 特征 / 1 产物，端到端 smoke 测试 |
 
 ---
@@ -92,6 +93,7 @@ python webui/run_webui.py    # 打开 http://127.0.0.1:8000
 | 能力 | CLI 标志 | 说明 |
 |---|---|---|
 | **电催化 CO₂RR 体系** | `--task eco2rr` | 新增 `ECO2RRTask`（19 特征 / 8 产物 FE%），与光催化 `CO2RRTask` 并存；首个使用**类别特征**的 Task（金属 / 阳离子 / 电解池类型），自动路由 `MixedSingleTaskGP`；产物受 FE 总和 ≤ 100% 约束 |
+| **肽配体电催化体系** | `--task peptide` | 新增 `PeptideECO2RRTask`（7 连续特征 / 10 气相产物）；配体以**氨基酸描述符**而非类别编码，边界覆盖全部 20 种天然残基，候选池枚举 20 残基 × 电位，**BO 因此能提议未测过的残基**；`nearest_residue()` 把连续提议解码回真实残基 |
 | **多目标 BO (qNEHVI)** | `--multi-objective --objectives CO H2 --ref-point 0 5` | `ModelListGP`（每个目标一条 GP）+ `qNoisyExpectedHypervolumeImprovement` 采集，内置 Task 预设（`TestTask`: y/y2；`CO2RRTask`: CO 最大化 vs HER 最小化；`ECO2RRTask`: FE_CO 最大化 vs FE_H2 最小化）；运行结束写 `pareto_front.csv` + `pareto_front.png`，`ObjectiveSpec(direction="min")` 自动符号翻转 |
 | **稀疏 / 变分 GP (SVGP)** | `--gp-model auto` (默认) / `variational` / `exact` · `--num-inducing-points 100` | 大数据集场景切 BoTorch `SingleTaskVariationalGP`，Adam + `VariationalELBO` 训练，O(N·m²) 替代 ExactGP 的 O(N³)。`auto` 在 N ≥ 200 且无类别维时自动升档；类别任务或小数据自动留在 ExactGP。采集函数（UCB/qNEI/qNEHVI）无需改造 |
 | **ExpertPrior 分布扩展** | `--expert-prior-file priors/my_prior.json` | 新增 Beta（浓度/比例）、Log-Normal（正值偏斜）、Categorical（类别特征）分布，支持多先验组合与可微 log-score 评估 |
@@ -287,6 +289,37 @@ python -m kabo --task eco2rr --target-product C2H4 \
 ```
 
 > **类别维与采集函数**：`optimize_acqf` 把所有维松弛到连续盒子上求解，因此类别 / 整数维返回后必须snap 回整数网格 —— 否则会出现 `Metal_identity = 2.37` 这种解码不出任何金属的推荐。`SurrogateModel.snap_indices` 统一给出「整数 ∪ 类别」的维索引，`suggest_continuous` / `suggest_continuous_batch` / `suggest_mo_continuous` 三条路径都用它。
+
+### 肽配体电催化 CO₂RR 体系（`PeptideECO2RRTask`）
+
+**背景**：金属中心（Fe）挂氨基酸/短肽配体，扫电位，GC 测气相产物 FE。这个体系的核心问题是「下一个该试哪个残基」，而**把配体编码成类别就永远答不了这个问题**。
+
+- **为什么不用 categorical**：`CategoricalKernel` 只问「相同/不同」，类别之间没有度量；`design_space_bounds` 是 `(0, n-1)` 只覆盖已声明的类别，`generate_candidates()` 也只能枚举这些。**没测过的残基根本没有坐标，BO 永远提不出它**。这是编码的性质，补再多数据也没用。
+- **配体如何进入设计空间**：只通过其残基的**平均理化描述符**（`kabo/constants.py` 的 `AMINO_ACID_DESCRIPTORS`）——pI / Kyte-Doolittle 疏水性 / Zamyatnin 体积 / 侧链氢键给体·受体 / pH7 电荷。7 个特征**全部连续，零类别维**，因此代理模型留在普通 `SingleTaskGP`，`--gp-model auto` 数据长大后仍可升 SVGP。
+- **边界覆盖全部 20 种天然残基**：由 `aa_descriptor_bounds()` 从描述符表**导出**而非硬编码，保证任何未测残基都落在设计空间内，不会被归一化悄悄裁到隔壁残基的坐标上。
+- **候选池枚举 20 种残基**：`generate_candidates()` 枚举全部 20 种天然残基 × Sobol 电位——**这正是 BO 能提出未测残基的机制**。肽配体候选可通过 `candidates.csv` 提供。
+- **描述符编码的代价**：`optimize_acqf` 把配体维松弛到连续盒子，返回的是**嵌合体**——对应不到任何真实残基（例如 `Ligand_hbond_donors = 1.1424`，没有残基有 1.14 个氢键给体）。所以离散候选池是主路径；`nearest_residue()` 用于把连续提议解码回最近的真实残基，**并返回距离**（距离大 = 这个"最近残基"并不忠实于采集函数想要的东西）。
+- **平均的前提**：残基不单独配位金属（无「主配位残基」）。若某配体族不满足，这个表示需要重做。
+- **数据准备**：CSV 存人类可读的 `ligand` 列（`"His-Arg-His"`），用 `task.add_ligand_descriptors(df)` 生成 6 个 `Ligand_*` 数值列。`parse_sequence()` 接受 `His-Arg-His` / `his arg his` / `Gln_Met` / `met`，遇到未知残基**报错而非静默丢弃**（拼错导致肽变短却无声改变平均描述符，是最难查的那类 bug）。
+
+```python
+from kabo import KABOOptimizer, PeptideECO2RRTask
+import pandas as pd
+
+task = PeptideECO2RRTask()
+df = task.add_ligand_descriptors(pd.read_csv("data/raw.csv"), ligand_column="ligand")
+df["Applied_potential"] = df.potential_V
+df.to_csv("data/peptide_eco2rr.csv", index=False)
+```
+
+```bash
+# 示例 11：肽配体体系，惩罚 HER
+python -m kabo --task peptide --data data/peptide_eco2rr.csv \
+               --h2-penalty-weight 0.3 --skip-feature-selection \
+               --iterations 10 --seed 42
+```
+
+> **描述符可辨识性**：描述符要能用，需要足够多的**不同配体**。4 个配体时，6 个描述符中心化后最多张成秩 3，且在其它特征的趋势之外**没有可证明的信号**。验证方式必须是「留一配体交叉验证」对比一个**去掉描述符的对照**（只留其余特征），而不是对比预测均值的基线——后者会把电位趋势的功劳错记到描述符头上。
 
 ### WebUI 多会话机制
 
