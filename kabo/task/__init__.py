@@ -28,6 +28,7 @@ from kabo.task.base import (
 # Importing each concrete task triggers its @register_task decorator.
 from kabo.task.co2rr import CO2RRTask
 from kabo.task.eco2rr import ECO2RRTask
+from kabo.task.peptide_eco2rr import PeptideECO2RRTask
 from kabo.task.test_task import TestTask
 
 __all__ = [
@@ -37,5 +38,6 @@ __all__ = [
     "get_task",
     "CO2RRTask",
     "ECO2RRTask",
+    "PeptideECO2RRTask",
     "TestTask",
 ]

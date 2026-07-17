@@ -8,8 +8,9 @@ prompts, simulation) are supplied by a ``TaskBase`` implementation,
 while the algorithmic core (``KABOEngine``) remains system-agnostic.
 
 Built-in tasks: ``CO2RRTask`` (photocatalytic CO2 reduction),
-``ECO2RRTask`` (electrocatalytic CO2 reduction), ``TestTask`` (minimal
-synthetic task for smoke tests).
+``ECO2RRTask`` (electrocatalytic CO2 reduction), ``PeptideECO2RRTask``
+(peptide-ligated electrocatalytic CO2RR, descriptor-encoded ligand),
+``TestTask`` (minimal synthetic task for smoke tests).
 
 The methodology follows arXiv:2604.01328v3:
     "Efficient and Principled Scientific Discovery through
@@ -49,6 +50,7 @@ __all__ = [
     "TaskBase",
     "CO2RRTask",
     "ECO2RRTask",
+    "PeptideECO2RRTask",
     "TestTask",
     "TASK_REGISTRY",
     "get_task",
@@ -65,6 +67,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "TASK_REGISTRY": ("kabo.task", "TASK_REGISTRY"),
     "CO2RRTask": ("kabo.task", "CO2RRTask"),
     "ECO2RRTask": ("kabo.task", "ECO2RRTask"),
+    "PeptideECO2RRTask": ("kabo.task", "PeptideECO2RRTask"),
     "TaskBase": ("kabo.task", "TaskBase"),
     "TestTask": ("kabo.task", "TestTask"),
     "get_task": ("kabo.task", "get_task"),
@@ -96,6 +99,7 @@ if TYPE_CHECKING:  # static type checkers still see concrete imports
         TASK_REGISTRY,
         CO2RRTask,
         ECO2RRTask,
+        PeptideECO2RRTask,
         TaskBase,
         TestTask,
         get_task,

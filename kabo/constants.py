@@ -230,3 +230,128 @@ ECO2RR_DEFAULT_TARGET_PRODUCT: str = "CO"
 
 # Total Faradaic efficiency cap (%) used for validation / simulation.
 ECO2RR_FE_TOTAL_MAX: float = 100.0
+
+
+# ===========================================================================
+#  AMINO-ACID DESCRIPTOR TABLE
+#
+#  Standard tabulated physicochemical descriptors for the 20 canonical
+#  residues.  These exist so a Task can encode an amino-acid / peptide
+#  ligand as CONTINUOUS descriptors rather than as a categorical identity.
+#
+#  Why that matters: a categorical feature carries no metric between its
+#  levels, so a GP can never say anything about a residue it has not seen.
+#  Descriptors give every residue — tested or not — a coordinate, which is
+#  what lets BO extrapolate to untested residues at all.  (``CO2RRTask``
+#  already applies the same idea via ``A_pI`` / ``A_hbond_*``.)
+#
+#  Scales:
+#    pI       — isoelectric point
+#    kd       — Kyte-Doolittle hydropathy (negative = hydrophilic)
+#    volume   — Zamyatnin residue volume (Å^3)
+#    hbd/hba  — side-chain H-bond donors / acceptors (counts)
+#    charge   — net side-chain charge at pH 7 (His ~+0.1, pKa ~6.0)
+# ===========================================================================
+AA_DESCRIPTOR_NAMES: list[str] = ["pI", "kd", "volume", "hbd", "hba", "charge"]
+
+# residue -> (pI, kd, volume, hbd, hba, charge@pH7)
+AMINO_ACID_DESCRIPTORS: dict[str, tuple[float, float, float, float, float, float]] = {
+    "Ala": (6.00,  1.8,  88.6, 0, 0,  0.0),
+    "Arg": (10.76, -4.5, 173.4, 5, 0,  1.0),
+    "Asn": (5.41, -3.5, 114.1, 2, 1,  0.0),
+    "Asp": (2.77, -3.5, 111.1, 0, 2, -1.0),
+    "Cys": (5.07,  2.5, 108.5, 1, 1,  0.0),
+    "Gln": (5.65, -3.5, 143.8, 2, 1,  0.0),
+    "Glu": (3.22, -3.5, 138.4, 0, 2, -1.0),
+    "Gly": (5.97, -0.4,  60.1, 0, 0,  0.0),
+    "His": (7.59, -3.2, 153.2, 1, 1,  0.1),
+    "Ile": (6.02,  4.5, 166.7, 0, 0,  0.0),
+    "Leu": (5.98,  3.8, 166.7, 0, 0,  0.0),
+    "Lys": (9.74, -3.9, 168.6, 3, 0,  1.0),
+    "Met": (5.74,  1.9, 162.9, 0, 1,  0.0),
+    "Phe": (5.48,  2.8, 189.9, 0, 0,  0.0),
+    "Pro": (6.30, -1.6, 112.7, 0, 0,  0.0),
+    "Ser": (5.68, -0.8,  89.0, 1, 1,  0.0),
+    "Thr": (5.60, -0.7, 116.1, 1, 1,  0.0),
+    "Trp": (5.89, -0.9, 227.8, 1, 0,  0.0),
+    "Tyr": (5.66, -1.3, 193.6, 1, 1,  0.0),
+    "Val": (5.96,  4.2, 140.0, 0, 0,  0.0),
+}
+
+# Common three-letter aliases seen in lab notebooks / spreadsheets.
+AA_ALIASES: dict[str, str] = {
+    "gln": "Gln", "met": "Met", "his": "His", "arg": "Arg", "lys": "Lys",
+    "asp": "Asp", "glu": "Glu", "gly": "Gly", "ala": "Ala", "ser": "Ser",
+    "thr": "Thr", "cys": "Cys", "asn": "Asn", "pro": "Pro", "val": "Val",
+    "ile": "Ile", "leu": "Leu", "phe": "Phe", "trp": "Trp", "tyr": "Tyr",
+}
+
+
+def aa_descriptor_bounds() -> dict[str, tuple[float, float]]:
+    """Descriptor bounds spanning ALL 20 canonical residues.
+
+    Derived from the table rather than hard-coded so that the design space
+    provably contains every residue — an untested one must never fall
+    outside the bounds the surrogate normalises with, or it would be
+    silently clipped onto a different residue's coordinate.
+    """
+    # strict=: a silently truncated zip here would mis-align descriptor
+    # names with their columns, i.e. hand back another descriptor's bounds.
+    cols = list(zip(*AMINO_ACID_DESCRIPTORS.values(), strict=True))
+    return {
+        name: (float(min(col)), float(max(col)))
+        for name, col in zip(AA_DESCRIPTOR_NAMES, cols, strict=True)
+    }
+
+
+# ===========================================================================
+#  PEPTIDE-LIGATED ELECTROCATALYTIC CO2RR  (PeptideECO2RRTask)
+#
+#  A metal centre (Fe) carrying an amino-acid / peptide ligand, swept over
+#  applied potential.  The ligand enters the design space ONLY through its
+#  averaged residue descriptors above — there is deliberately no
+#  categorical "which catalyst" dimension, because that is exactly what
+#  would prevent BO from proposing a residue that has never been tested.
+#
+#  Products are gas-phase only (GC-quantified); there is no liquid-product
+#  column here, which is why this task does not reuse ECO2RR_PRODUCT_COLUMNS.
+# ===========================================================================
+PEPTIDE_LIGAND_PREFIX: str = "Ligand_"
+
+PEPTIDE_FEATURE_COLUMNS: list[str] = [
+    "Ligand_pI", "Ligand_hydropathy", "Ligand_volume",
+    "Ligand_hbond_donors", "Ligand_hbond_acceptors", "Ligand_charge",
+    "Applied_potential",
+]
+
+# Maps a feature column back onto its entry in AA_DESCRIPTOR_NAMES.
+PEPTIDE_LIGAND_DESCRIPTOR_MAP: dict[str, str] = {
+    "Ligand_pI": "pI",
+    "Ligand_hydropathy": "kd",
+    "Ligand_volume": "volume",
+    "Ligand_hbond_donors": "hbd",
+    "Ligand_hbond_acceptors": "hba",
+    "Ligand_charge": "charge",
+}
+
+# Applied potential sweep window (V vs. reference), from the measured range.
+PEPTIDE_POTENTIAL_BOUNDS: tuple[float, float] = (-2.4, -1.0)
+
+PEPTIDE_PRODUCT_COLUMNS: dict[str, str] = {
+    "CO":    "FE_CO",      # Carbon monoxide (2 e-)
+    "CH4":   "FE_CH4",     # Methane
+    "C2H2":  "FE_C2H2",    # Acetylene
+    "C2H4":  "FE_C2H4",    # Ethylene
+    "C2H6":  "FE_C2H6",    # Ethane
+    "C3H4":  "FE_C3H4",    # Propyne / allene
+    "C3H6":  "FE_C3H6",    # Propylene
+    "C3H8":  "FE_C3H8",    # Propane
+    "C4H10": "FE_C4H10",   # Butane
+    "H2":    "FE_H2",      # Hydrogen (competing HER)
+}
+
+PEPTIDE_ALL_PRODUCT_COLUMNS: list[str] = list(PEPTIDE_PRODUCT_COLUMNS.values())
+PEPTIDE_PRODUCT_NAMES: dict[str, str] = {
+    v: k for k, v in PEPTIDE_PRODUCT_COLUMNS.items()
+}
+PEPTIDE_DEFAULT_TARGET_PRODUCT: str = "CO"
